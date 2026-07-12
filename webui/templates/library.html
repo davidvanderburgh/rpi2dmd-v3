@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Library{% endblock %}
+{% block content %}
+<h1>Library</h1>
+
+<div class="tab-row" id="lib-tabs">
+  <button class="tab active" data-tab="dmd">DMD animations <span class="mono" id="dmd-count"></span></button>
+  <button class="tab" data-tab="gif">GIF clips <span class="mono" id="gif-count"></span></button>
+</div>
+
+<section class="tab-pane" id="pane-dmd">
+  <div class="btn-row bulk-row">
+    <button class="btn btn-sm" data-bulk="dmd_all" data-enabled="true">Enable all DMD</button>
+    <button class="btn btn-sm btn-danger" data-bulk="dmd_all" data-enabled="false">Disable all DMD</button>
+  </div>
+  <div id="dmd-list" class="lib-list"><div class="loading">Loading library&hellip;</div></div>
+</section>
+
+<section class="tab-pane" id="pane-gif" hidden>
+  <div class="btn-row bulk-row">
+    <button class="btn btn-sm" data-bulk="gif_all" data-enabled="true">Enable all GIF</button>
+    <button class="btn btn-sm btn-danger" data-bulk="gif_all" data-enabled="false">Disable all GIF</button>
+  </div>
+  <div id="gif-list" class="lib-list"><div class="loading">Loading library&hellip;</div></div>
+</section>
+{% endblock %}

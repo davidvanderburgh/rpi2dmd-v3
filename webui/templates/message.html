@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Message{% endblock %}
+{% block content %}
+{% set m = cfg.message %}
+<h1>Custom message</h1>
+
+<form id="message-form" onsubmit="return false;">
+<div class="grid-2">
+<section class="card">
+  <h2>Text</h2>
+  <label class="switch-row">
+    <span>Message enabled (scheduled)</span>
+    <span class="switch"><input type="checkbox" data-cfg="message.enabled"
+      {% if m.enabled %}checked{% endif %}><span class="slider"></span></span>
+  </label>
+  <label class="field">Message text
+    <textarea id="msg-text" data-cfg="message.text" rows="3" maxlength="500">{{ m.text }}</textarea>
+    <span class="hint">Tokens: <code>{time}</code> <code>{date}</code> <code>{temp}</code> are replaced when displayed.</span>
+  </label>
+  <div class="btn-row">
+    <button class="btn btn-primary" id="msg-send">Send now</button>
+    <span class="hint">Scrolls once immediately &mdash; no save needed.</span>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Appearance &amp; timing</h2>
+  <label class="field">Speed
+    <select data-cfg="message.speed">
+      {% for v in ['very_slow','slow','normal','fast','very_fast','insane'] %}
+      <option value="{{ v }}" {% if m.speed == v %}selected{% endif %}>{{ v.replace('_',' ')|title }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">Movement
+    <select data-cfg="message.movement">
+      {% for v in ['horizontal','bounce','loop','diagonal','vertical','static','random'] %}
+      <option value="{{ v }}" {% if m.movement == v %}selected{% endif %}>{{ v|title }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">Position
+    <select data-cfg="message.position">
+      {% for v in ['top','high','middle','low','bottom','random'] %}
+      <option value="{{ v }}" {% if m.position == v %}selected{% endif %}>{{ v|title }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">Text mode
+    <select data-cfg="message.text_mode">
+      <option value="enhanced" {% if m.text_mode == 'enhanced' %}selected{% endif %}>Enhanced</option>
+      <option value="black_shadow" {% if m.text_mode == 'black_shadow' %}selected{% endif %}>Black shadow</option>
+      <option value="plain" {% if m.text_mode == 'plain' %}selected{% endif %}>Plain</option>
+    </select>
+  </label>
+  <label class="field">Clock while message shows
+    <select data-cfg="message.clock_position">
+      <option value="in_front" {% if m.clock_position == 'in_front' %}selected{% endif %}>Clock in front</option>
+      <option value="behind" {% if m.clock_position == 'behind' %}selected{% endif %}>Clock behind</option>
+      <option value="random" {% if m.clock_position == 'random' %}selected{% endif %}>Random</option>
+      <option value="no_clock" {% if m.clock_position == 'no_clock' %}selected{% endif %}>No clock</option>
+    </select>
+  </label>
+  <label class="field">Frequency
+    <select data-cfg="message.frequency">
+      {% for value, label in message_freqs %}
+      <option value="{{ value }}" {% if m.frequency == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+</section>
+</div>
+
+<div class="save-bar">
+  <button class="btn btn-primary" id="message-save">Save</button>
+</div>
+</form>
+{% endblock %}

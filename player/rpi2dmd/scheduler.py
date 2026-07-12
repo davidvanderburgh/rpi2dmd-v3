@@ -1,0 +1,451 @@
+"""Scheduler: the Run-DMD playback model.
+
+Clock idles for the configured animation-frequency gap, then one animation
+plays (DMD with probability playback.dmd_share%, else GIF), interleaving
+date/weather/message scenes at their own frequencies. Sleep window,
+per-hour brightness, config hot-reload and the control commands
+(pause/skip/play/marquee/test) are all handled here; per-scene exceptions
+are logged and swallowed so the appliance never dies.
+
+Python 3.7 compatible.
+"""
+
+import datetime
+import os
+import random
+import sys
+import time
+import traceback
+
+from PIL import Image
+
+from . import paths, scenes, transitions
+
+MESSAGE_FREQ_S = {"1s": 1, "5s": 5, "15s": 15, "30s": 30, "1m": 60, "5m": 300}
+WEATHER_SHOW_INTERVAL_S = 3600
+SNAPSHOT_INTERVAL_S = 2.0
+
+
+def _blank_scene(canvas, total_ms, tick_ms=500):
+    img = Image.new("RGB", canvas)
+    left = int(total_ms)
+    while left > 0:
+        hold = min(tick_ms, left)
+        yield img, hold
+        left -= hold
+
+
+def _in_sleep_window(cfg, now):
+    if not cfg.get("schedule.enabled", False):
+        return False
+
+    def minutes(s):
+        try:
+            hh, mm = str(s).split(":")
+            return int(hh) * 60 + int(mm)
+        except (ValueError, TypeError):
+            return None
+
+    start = minutes(cfg.get("schedule.sleep", "23:30"))
+    end = minutes(cfg.get("schedule.wake", "06:30"))
+    if start is None or end is None or start == end:
+        return False
+    t = now.hour * 60 + now.minute
+    if start < end:
+        return start <= t < end
+    return t >= start or t < end  # window crosses midnight
+
+
+class Scheduler(object):
+    """Owns the main loop; drives scenes to the driver."""
+
+    def __init__(self, cfg, driver, state, library, rng=None, weather=None,
+                 fast=False, max_frames=None, snapshot_path=None):
+        self.cfg = cfg
+        self.driver = driver
+        self.state = state
+        self.library = library
+        self.rng = rng or random.Random()
+        self.weather = weather
+        self.fast = fast
+        self.max_frames = max_frames
+        self.snapshot_path = snapshot_path
+        if snapshot_path:
+            d = os.path.dirname(snapshot_path)
+            if d and not os.path.isdir(d):
+                try:
+                    os.makedirs(d)
+                except OSError:
+                    pass
+        self.canvas = (driver.width, driver.height)
+        self.frames_shown = 0
+        self.scene_log = []       # scene identifiers, for tests/debugging
+        self._sim_now = time.time()
+        self._last_snapshot = 0.0
+        self._last_hour = None
+        self._prev_window = None
+        self._last_message = 0.0
+        self._last_weather = 0.0
+        self._cycle = 0
+        self._backgrounds = scenes.scan_backgrounds()
+
+    # -- time --------------------------------------------------------------
+    def _now(self):
+        return self._sim_now if self.fast else time.time()
+
+    def _advance_ms(self, ms):
+        if self.fast:
+            self._sim_now += ms / 1000.0
+
+    def _sleep_ms(self, ms):
+        if self.fast:
+            self._advance_ms(ms)
+            return
+        end = time.time() + ms / 1000.0
+        st = self.state
+        while True:
+            if st.stop_requested or st.skip_pending or st.paused:
+                return
+            remaining = end - time.time()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.05, remaining))
+
+    # -- frame pump ----------------------------------------------------------
+    def play_scene(self, scene, state_name, now_playing=None, log=None):
+        """Drive one scene to the driver, honoring control flags.
+        Exceptions inside the scene are logged and swallowed."""
+        st = self.state
+        self.scene_log.append(log or state_name)
+        st.set_scene(state_name, now_playing)
+        try:
+            for img, hold in scene:
+                if st.stop_requested:
+                    break
+                if st.take_skip():
+                    break
+                if st.paused:
+                    if not self._pause_gate(state_name):
+                        break
+                self._apply_brightness()
+                self.driver.show(img)
+                self.frames_shown += 1
+                self._maybe_snapshot()
+                st.tick()
+                if self.max_frames is not None \
+                        and self.frames_shown >= self.max_frames:
+                    st.request_stop()
+                    break
+                self._sleep_ms(hold)
+        except Exception:
+            sys.stderr.write("scene %r failed:\n" % (state_name,))
+            traceback.print_exc()
+
+    def _pause_gate(self, resume_state):
+        """Blank the panel and hold while paused. -> False if stopping."""
+        st = self.state
+        try:
+            self.driver.clear()
+        except Exception:
+            pass
+        st.set_scene("paused")
+        while st.paused and not st.stop_requested:
+            time.sleep(0.02)
+            self._advance_ms(100)
+            st.tick()
+        st.set_scene(resume_state)
+        return not st.stop_requested
+
+    def _maybe_snapshot(self):
+        if not self.snapshot_path:
+            return
+        snap = getattr(self.driver, "snapshot", None)
+        if snap is None:
+            return
+        now = time.time()
+        if now - self._last_snapshot >= SNAPSHOT_INTERVAL_S:
+            self._last_snapshot = now
+            try:
+                snap(self.snapshot_path)
+            except OSError:
+                pass
+
+    # -- housekeeping ---------------------------------------------------------
+    def _apply_brightness(self):
+        st = self.state
+        hour = datetime.datetime.now().hour
+        if hour != self._last_hour:
+            if self._last_hour is not None:
+                st.clear_brightness_override()
+            self._last_hour = hour
+        pct = st.brightness_override
+        if pct is None:
+            pct = self.cfg.brightness_now(hour)
+        if pct != st.brightness:
+            try:
+                self.driver.set_brightness(pct)
+            except Exception:
+                pass
+            st.set_brightness(pct)
+
+    def _boundary(self):
+        """Scene-boundary housekeeping: hot reload + brightness + status."""
+        st = self.state
+        if st.take_reload() or self.cfg.changed_on_disk():
+            try:
+                self.cfg.load()
+                self.library.refresh()
+                self._backgrounds = scenes.scan_backgrounds()
+            except Exception:
+                traceback.print_exc()
+            st.set_counts(self.library.counts(self.cfg))
+        self._apply_brightness()
+        st.tick()
+
+    def _sleep_gate(self):
+        """Handle the sleep window / manual sleep. -> True if it slept."""
+        st = self.state
+        now = datetime.datetime.now()
+        window = _in_sleep_window(self.cfg, now)
+        if window != self._prev_window:
+            self._prev_window = window
+            st.clear_sleep_override()
+        ov = st.sleep_override
+        if not (ov == "sleep" or (window and ov != "wake")):
+            return False
+        st.set_scene("sleeping", {"type": "clock", "game": "", "name": "",
+                                  "started_at": time.time(),
+                                  "duration_ms": 0})
+        self.scene_log.append("sleeping")
+        black = Image.new("RGB", self.canvas)
+        while not st.stop_requested:
+            now = datetime.datetime.now()
+            window = _in_sleep_window(self.cfg, now)
+            if window != self._prev_window:
+                self._prev_window = window
+                st.clear_sleep_override()
+            ov = st.sleep_override
+            if not (ov == "sleep" or (window and ov != "wake")):
+                break
+            st.take_skip()  # skip is meaningless while sleeping
+            self.driver.show(black)
+            self.frames_shown += 1
+            self._maybe_snapshot()
+            st.tick()
+            if self.max_frames is not None \
+                    and self.frames_shown >= self.max_frames:
+                st.request_stop()
+                break
+            self._sleep_ms(1000)
+        return True
+
+    # -- content picking ---------------------------------------------------
+    def _pick_animation(self):
+        """-> ('dmd'|'gif', item tuple) or None, per sources + dmd_share."""
+        cfg = self.cfg
+        sources = cfg.get("playback.sources", {}) or {}
+        dmd_ok = bool(sources.get("dmd", True))
+        gif_ok = bool(sources.get("gif", True))
+        try:
+            share = float(cfg.get("playback.dmd_share", 60))
+        except (TypeError, ValueError):
+            share = 60
+        want_dmd = dmd_ok and (not gif_ok or
+                               self.rng.uniform(0, 100) < share)
+        if want_dmd:
+            item = self.library.pick_dmd(self.rng, cfg)
+            if item is not None:
+                return "dmd", item
+        if gif_ok:
+            item = self.library.pick_gif(self.rng, cfg)
+            if item is not None:
+                return "gif", item
+        if dmd_ok and not want_dmd:
+            item = self.library.pick_dmd(self.rng, cfg)
+            if item is not None:
+                return "dmd", item
+        return None
+
+    def _play_name_card(self, title):
+        self.play_scene(scenes.name_scene(self.cfg, title, self.canvas),
+                        "animation", log="name")
+
+    def _play_dmd(self, game, name, path):
+        cfg = self.cfg
+        show = cfg.get("playback.show_name", "hide")
+        title = name.replace("_", " ")
+        if show == "before":
+            self._play_name_card(title)
+        if self.state.stop_requested:
+            return
+        found = self.library.get_dmd(game, name)
+        duration = found[0].get("duration_ms", 0) if found else 0
+        np = {"type": "dmd", "game": game, "name": name,
+              "started_at": time.time(), "duration_ms": duration}
+        self.play_scene(scenes.dmd_scene(cfg, path, canvas=self.canvas),
+                        "animation", np, log=("dmd", game, name))
+        if show == "after" and not self.state.stop_requested:
+            self._play_name_card(title)
+
+    def _play_gif(self, category, filename, path):
+        cfg = self.cfg
+        show = cfg.get("playback.show_name", "hide")
+        title = os.path.splitext(filename)[0].replace("_", " ")
+        if show == "before":
+            self._play_name_card(title)
+        if self.state.stop_requested:
+            return
+        np = {"type": "gif", "game": category, "name": filename,
+              "started_at": time.time(), "duration_ms": 0}
+        self.play_scene(scenes.gif_scene(cfg, path, canvas=self.canvas),
+                        "animation", np, log=("gif", category, filename))
+        if show == "after" and not self.state.stop_requested:
+            self._play_name_card(title)
+
+    def _play_queued(self, item):
+        kind = item.get("type")
+        parts = str(item.get("id", "")).split("/", 1)
+        if len(parts) != 2:
+            return
+        if kind == "dmd":
+            found = self.library.get_dmd(parts[0], parts[1])
+            if found is not None:
+                self._play_dmd(parts[0], parts[1], found[1])
+        elif kind == "gif":
+            path = self.library.gif_path(parts[0], parts[1])
+            if path is not None:
+                self._play_gif(parts[0], parts[1], path)
+
+    # -- scene slots ----------------------------------------------------------
+    def _play_clock_cycle(self, gap_seconds):
+        cfg = self.cfg
+        if cfg.get("clock.enabled", True):
+            if gap_seconds is not None:
+                dwell = int(gap_seconds * 1000)
+            else:
+                dwell = int(cfg.get("clock.idle_dwell_ms", 6000))
+            sc = scenes.clock_scene(cfg, self.canvas, dwell,
+                                    self._backgrounds, rng=self.rng)
+            sc = transitions.wrap(sc, cfg.get("clock.transition", "random"),
+                                  self.rng)
+            np = {"type": "clock", "game": "", "name": "clock",
+                  "started_at": time.time(), "duration_ms": dwell}
+            self.play_scene(sc, "clock", np)
+        else:
+            dwell = int(gap_seconds * 1000) if gap_seconds is not None \
+                else 1000
+            self.play_scene(_blank_scene(self.canvas, dwell), "clock",
+                            log="blank")
+
+    def _interleaves(self):
+        cfg = self.cfg
+        st = self.state
+        every = int(cfg.get("date.every_n_cycles", 4) or 0)
+        if cfg.get("date.enabled", True) and every > 0 \
+                and self._cycle % every == 0:
+            np = {"type": "clock", "game": "", "name": "date",
+                  "started_at": time.time(),
+                  "duration_ms": int(cfg.get("date.dwell_ms", 2500))}
+            self.play_scene(scenes.date_scene(cfg, self.canvas), "clock",
+                            np, log="date")
+        if st.stop_requested:
+            return
+        wdata = self.weather.data() if self.weather is not None else None
+        if cfg.get("weather.enabled", False) and wdata is not None \
+                and self._now() - self._last_weather >= WEATHER_SHOW_INTERVAL_S:
+            self._last_weather = self._now()
+            np = {"type": "clock", "game": "", "name": "weather",
+                  "started_at": time.time(),
+                  "duration_ms": int(cfg.get("weather.dwell_ms", 3500))}
+            self.play_scene(scenes.weather_scene(cfg, wdata, self.canvas),
+                            "clock", np, log="weather")
+        if st.stop_requested:
+            return
+        freq = MESSAGE_FREQ_S.get(cfg.get("message.frequency", "off"))
+        if cfg.get("message.enabled", False) and freq \
+                and self._now() - self._last_message >= freq:
+            self._last_message = self._now()
+            np = {"type": "message", "game": "",
+                  "name": cfg.get("message.text", ""),
+                  "started_at": time.time(), "duration_ms": 0}
+            self.play_scene(
+                scenes.message_scene(cfg, canvas=self.canvas, rng=self.rng),
+                "message", np, log="message")
+
+    def _maybe_show_ip(self):
+        if not self.cfg.get("system.show_ip_on_change", True):
+            return
+        ips = scenes.get_ip_list()
+        current = ",".join(ips)
+        marker = os.path.join(paths.run_dir(), "last_ip.txt")
+        previous = None
+        try:
+            with open(marker, "r") as f:
+                previous = f.read().strip()
+        except OSError:
+            pass
+        if current and current != previous:
+            self.play_scene(scenes.ip_scene(self.cfg, self.canvas),
+                            "clock", log="ip")
+            try:
+                with open(marker, "w") as f:
+                    f.write(current)
+            except OSError:
+                pass
+
+    # -- main loop -----------------------------------------------------------
+    def run(self):
+        st = self.state
+        st.set_counts(self.library.counts(self.cfg))
+        try:
+            self._maybe_show_ip()
+        except Exception:
+            traceback.print_exc()
+        while not st.stop_requested:
+            self._boundary()
+            if self._sleep_gate():
+                continue
+            if st.stop_requested:
+                break
+            if st.take_test():
+                np = {"type": "clock", "game": "", "name": "test_pattern",
+                      "started_at": time.time(), "duration_ms": 0}
+                self.play_scene(scenes.test_scene(self.cfg, self.canvas),
+                                "test", np)
+                continue
+            marquee = st.take_marquee()
+            if marquee is not None:
+                np = {"type": "message", "game": "", "name": marquee,
+                      "started_at": time.time(), "duration_ms": 0}
+                self.play_scene(
+                    scenes.message_scene(self.cfg, text_override=marquee,
+                                         canvas=self.canvas, rng=self.rng),
+                    "message", np, log="marquee")
+                continue
+            queued = st.take_play()
+            if queued is not None:
+                self._play_queued(queued)
+                continue
+
+            gap = self.cfg.animation_gap_seconds(self.rng)
+            self._play_clock_cycle(gap)
+            if st.stop_requested:
+                break
+            self._cycle += 1
+            self._interleaves()
+            if st.stop_requested:
+                break
+            if gap is None:
+                continue  # animations disabled: clock forever
+            queued = st.take_play()
+            if queued is not None:
+                self._play_queued(queued)
+                continue
+            picked = self._pick_animation()
+            if picked is None:
+                continue
+            kind, item = picked
+            if kind == "dmd":
+                self._play_dmd(*item)
+            else:
+                self._play_gif(*item)

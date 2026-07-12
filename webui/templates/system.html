@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}System{% endblock %}
+{% block content %}
+{% set web = cfg.web %}
+<h1>System</h1>
+
+<div class="grid-2">
+<section class="card">
+  <h2>Player</h2>
+  <div class="np-head">
+    <span class="badge" id="sys-state">offline</span>
+    <span class="mono" id="sys-uptime"></span>
+  </div>
+  <div class="btn-row">
+    <button class="btn" data-ctl-confirm="restart_player" data-confirm="Restart the player daemon?">Restart player</button>
+    <button class="btn btn-danger" data-ctl-confirm="reboot" data-confirm="Reboot the device?">Reboot</button>
+    <button class="btn btn-danger" data-ctl-confirm="shutdown" data-confirm="Shut the device down? You will need to power-cycle it.">Shutdown</button>
+  </div>
+  <div class="btn-row">
+    <button class="btn btn-sm" data-ctl="test_pattern">Run DMD test pattern</button>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Web access</h2>
+  <form id="auth-form" onsubmit="return false;">
+  <label class="switch-row">
+    <span>Require password (HTTP Basic)</span>
+    <span class="switch"><input type="checkbox" data-cfg="web.auth_enabled"
+      {% if web.auth_enabled %}checked{% endif %}><span class="slider"></span></span>
+  </label>
+  <label class="field">Username
+    <input type="text" data-cfg="web.username" value="{{ web.username }}" autocomplete="off">
+  </label>
+  <label class="field">Password
+    <span class="reveal-wrap">
+      <input type="password" id="web-pass" data-cfg="web.password" value="{{ web.password }}" autocomplete="new-password">
+      <button type="button" class="btn btn-sm" id="pass-reveal">Show</button>
+    </span>
+  </label>
+  <div class="btn-row">
+    <button class="btn btn-primary" id="auth-save">Save web access</button>
+  </div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Logs</h2>
+  <div class="btn-row">
+    <select id="log-unit" class="inline-select">
+      <option value="player">rpi2dmd-player</option>
+      <option value="web">rpi2dmd-web</option>
+    </select>
+    <button class="btn btn-sm" id="log-refresh">Refresh</button>
+  </div>
+  <pre id="log-view" class="log-view">Press Refresh to load logs.</pre>
+</section>
+
+<section class="card">
+  <h2>Backup &amp; restore</h2>
+  <div class="btn-row">
+    <a class="btn" href="/api/backup" download="rpi2dmd.json">Download settings backup</a>
+  </div>
+  <div class="btn-row">
+    <input type="file" id="restore-file" accept=".json,application/json">
+    <button class="btn" id="restore-upload">Restore from file</button>
+  </div>
+  <hr class="rule">
+  <div class="btn-row">
+    <button class="btn btn-danger" id="factory-reset">Factory reset settings</button>
+    <span class="hint">Rewrites rpi2dmd.json with pure defaults. Library files are not touched.</span>
+  </div>
+</section>
+</div>
+
+<div class="footnote mono">RPI2DMD v3 &middot; web UI {{ version }}</div>
+{% endblock %}

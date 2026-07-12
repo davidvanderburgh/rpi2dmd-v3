@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Playback{% endblock %}
+{% block content %}
+{% set p = cfg.playback %}
+<h1>Playback</h1>
+
+<form id="playback-form" onsubmit="return false;">
+<div class="grid-2">
+<section class="card">
+  <h2>Animations</h2>
+  <label class="switch-row">
+    <span>Animations enabled</span>
+    <span class="switch"><input type="checkbox" data-cfg="playback.animations_enabled"
+      {% if p.animations_enabled %}checked{% endif %}><span class="slider"></span></span>
+  </label>
+  <label class="field">Animation frequency
+    <select data-cfg="playback.frequency">
+      {% for value, label in freq_labels %}
+      <option value="{{ value }}" {% if p.frequency == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <span class="hint">How long the clock idles between animations.</span>
+  </label>
+  <label class="field">Content mix <span class="live-val mono" id="share-label"></span>
+    <input type="range" id="dmd-share" data-cfg="playback.dmd_share" min="0" max="100" step="5" value="{{ p.dmd_share }}">
+    <span class="hint">Chance each animation slot plays a DMD animation instead of a GIF clip.</span>
+  </label>
+  <label class="field">Content filter
+    <select data-cfg="playback.content_filter">
+      <option value="enabled_only" {% if p.content_filter == 'enabled_only' %}selected{% endif %}>Enabled items only</option>
+      <option value="show_all" {% if p.content_filter == 'show_all' %}selected{% endif %}>Show all (ignore enable flags)</option>
+    </select>
+  </label>
+</section>
+
+<section class="card">
+  <h2>Clock overlay during animations</h2>
+  <div class="radio-list">
+    <label class="radio-row"><input type="radio" name="clock_overlay" data-cfg="playback.clock_overlay" value="auto" {% if p.clock_overlay == 'auto' %}checked{% endif %}>
+      <span><b>Auto</b> &mdash; per-animation metadata, exactly as Run-DMD authored it</span></label>
+    <label class="radio-row"><input type="radio" name="clock_overlay" data-cfg="playback.clock_overlay" value="front" {% if p.clock_overlay == 'front' %}checked{% endif %}>
+      <span><b>Front</b> &mdash; always draw the clock on top of the animation</span></label>
+    <label class="radio-row"><input type="radio" name="clock_overlay" data-cfg="playback.clock_overlay" value="back" {% if p.clock_overlay == 'back' %}checked{% endif %}>
+      <span><b>Back</b> &mdash; clock behind, visible through black pixels</span></label>
+    <label class="radio-row"><input type="radio" name="clock_overlay" data-cfg="playback.clock_overlay" value="off" {% if p.clock_overlay == 'off' %}checked{% endif %}>
+      <span><b>Off</b> &mdash; never show the clock during animations</span></label>
+  </div>
+  <label class="switch-row">
+    <span>Clock over GIF clips too</span>
+    <span class="switch"><input type="checkbox" data-cfg="playback.gif_clock_overlay"
+      {% if p.gif_clock_overlay %}checked{% endif %}><span class="slider"></span></span>
+  </label>
+</section>
+
+<section class="card">
+  <h2>Titles</h2>
+  <div class="radio-list">
+    <label class="radio-row"><input type="radio" name="show_name" data-cfg="playback.show_name" value="hide" {% if p.show_name == 'hide' %}checked{% endif %}>
+      <span><b>Hide</b> &mdash; never show animation names</span></label>
+    <label class="radio-row"><input type="radio" name="show_name" data-cfg="playback.show_name" value="before" {% if p.show_name == 'before' %}checked{% endif %}>
+      <span><b>Before</b> &mdash; scrolling title card before each animation</span></label>
+    <label class="radio-row"><input type="radio" name="show_name" data-cfg="playback.show_name" value="during" {% if p.show_name == 'during' %}checked{% endif %}>
+      <span><b>During</b> &mdash; small static name in the lower left</span></label>
+    <label class="radio-row"><input type="radio" name="show_name" data-cfg="playback.show_name" value="after" {% if p.show_name == 'after' %}checked{% endif %}>
+      <span><b>After</b> &mdash; scrolling title card after each animation</span></label>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Startup &amp; display</h2>
+  <label class="field">Startup splash
+    <select data-cfg="playback.startup_splash">
+      <option value="rundmd" {% if p.startup_splash == 'rundmd' %}selected{% endif %}>RUN-DMD logo</option>
+      <option value="rpi2dmd" {% if p.startup_splash == 'rpi2dmd' %}selected{% endif %}>RPI2DMD logo</option>
+      <option value="none" {% if p.startup_splash == 'none' %}selected{% endif %}>None</option>
+    </select>
+  </label>
+  <label class="field">Gamma
+    <input type="number" data-cfg="display.gamma" min="1.0" max="3.0" step="0.1" value="{{ cfg.display.gamma }}">
+    <span class="hint">Brightness curve of the 16 DMD shades (1.6 = Run-DMD look).</span>
+  </label>
+</section>
+</div>
+
+<div class="save-bar">
+  <button class="btn btn-primary" id="playback-save">Save</button>
+</div>
+</form>
+{% endblock %}

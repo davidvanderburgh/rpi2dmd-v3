@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<section class="card now-playing" id="now-playing">
+  <div class="np-head">
+    <span class="np-state badge" id="np-state">offline</span>
+    <span class="np-elapsed mono" id="np-elapsed"></span>
+  </div>
+  <div class="np-title mono" id="np-title">Player offline</div>
+  <div class="np-sub" id="np-sub">The player daemon is not reachable. Configuration still works.</div>
+  <div class="btn-row">
+    <button class="btn" data-ctl="pause">Pause</button>
+    <button class="btn" data-ctl="resume">Resume</button>
+    <button class="btn" data-ctl="skip">Skip</button>
+    <button class="btn" data-ctl="sleep">Sleep</button>
+    <button class="btn" data-ctl="wake">Wake</button>
+  </div>
+</section>
+
+<section class="tiles">
+  <div class="card tile">
+    <div class="tile-label">Network</div>
+    <div class="tile-value mono">{{ ip }}</div>
+    <div class="tile-sub">{{ hostname }}</div>
+  </div>
+  <div class="card tile">
+    <div class="tile-label">Uptime</div>
+    <div class="tile-value mono" id="tile-uptime">{{ sys_uptime }}</div>
+    <div class="tile-sub" id="tile-uptime-sub">system</div>
+  </div>
+  <div class="card tile">
+    <div class="tile-label">CPU temp</div>
+    <div class="tile-value mono">{{ cpu_temp }}</div>
+    <div class="tile-sub">&nbsp;</div>
+  </div>
+  <div class="card tile">
+    <div class="tile-label">DMD library</div>
+    <div class="tile-value mono" id="tile-dmd">{{ counts.dmd_enabled }}/{{ counts.dmd_animations }}</div>
+    <div class="tile-sub">animations enabled</div>
+  </div>
+  <div class="card tile">
+    <div class="tile-label">GIF library</div>
+    <div class="tile-value mono" id="tile-gif">{{ counts.gif_enabled }}/{{ counts.gif_files }}</div>
+    <div class="tile-sub">files enabled</div>
+  </div>
+  <div class="card tile">
+    <div class="tile-label">Version</div>
+    <div class="tile-value mono" id="tile-version">{{ version }}</div>
+    <div class="tile-sub">web ui</div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Quick toggles</h2>
+  <div class="toggle-grid">
+    <label class="switch-row">
+      <span>Clock</span>
+      <span class="switch"><input type="checkbox" class="quick" data-cfg="clock.enabled"
+        {% if cfg.clock.enabled %}checked{% endif %}><span class="slider"></span></span>
+    </label>
+    <label class="switch-row">
+      <span>Animations</span>
+      <span class="switch"><input type="checkbox" class="quick" data-cfg="playback.animations_enabled"
+        {% if cfg.playback.animations_enabled %}checked{% endif %}><span class="slider"></span></span>
+    </label>
+    <label class="switch-row">
+      <span>Date</span>
+      <span class="switch"><input type="checkbox" class="quick" data-cfg="date.enabled"
+        {% if cfg.date.enabled %}checked{% endif %}><span class="slider"></span></span>
+    </label>
+    <label class="switch-row">
+      <span>Weather</span>
+      <span class="switch"><input type="checkbox" class="quick" data-cfg="weather.enabled"
+        {% if cfg.weather.enabled %}checked{% endif %}><span class="slider"></span></span>
+    </label>
+  </div>
+</section>
+{% endblock %}

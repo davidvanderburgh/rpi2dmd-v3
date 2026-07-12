@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}Clock{% endblock %}
+{% block content %}
+{% set c = cfg.clock %}
+<h1>Clock designer</h1>
+
+<section class="card preview-card">
+  <img id="clock-preview" class="dmd-preview" src="/api/preview/clock.png"
+       width="512" height="128" alt="clock preview">
+  <div class="preset-row">
+    <span class="preset-label">Presets</span>
+    <button class="btn btn-sm preset" data-preset='{"style":"rundmd","format":"12h","colon":"blink","color_mode":"tint","tint":"amber","align":"center","x":0,"y":0,"shade":15}'>Classic Run-DMD</button>
+    <button class="btn btn-sm preset" data-preset='{"style":"ttf","color_mode":"solid","color":"#ffffff","align":"center","x":0,"y":0}'>Minimal white</button>
+    <button class="btn btn-sm preset" data-preset='{"style":"digital","format":"24h","color_mode":"solid","color":"#ff0000","align":"center","x":0,"y":0}'>Big red 24h</button>
+    <button class="btn btn-sm preset" data-preset='{"style":"digital","color_mode":"solid","color":"#00ff46","align":"center","x":0,"y":0}'>Retro green</button>
+  </div>
+</section>
+
+<div class="grid-2">
+<section class="card">
+  <h2>Style &amp; format</h2>
+  <label class="field">Style
+    <select id="ck-style" data-clock="style">
+      <option value="rundmd" {% if c.style == 'rundmd' %}selected{% endif %}>Run-DMD pixel digits</option>
+      <option value="digital" {% if c.style == 'digital' %}selected{% endif %}>Digital (7-segment)</option>
+      <option value="ttf" {% if c.style == 'ttf' %}selected{% endif %}>TTF font</option>
+    </select>
+  </label>
+  <label class="field">Time format
+    <select id="ck-format" data-clock="format">
+      <option value="12h" {% if c.format == '12h' %}selected{% endif %}>12 hour</option>
+      <option value="12h_ampm" {% if c.format == '12h_ampm' %}selected{% endif %}>12 hour + AM/PM</option>
+      <option value="12h_sec" {% if c.format == '12h_sec' %}selected{% endif %}>12 hour + seconds</option>
+      <option value="24h" {% if c.format == '24h' %}selected{% endif %}>24 hour</option>
+      <option value="24h_sec" {% if c.format == '24h_sec' %}selected{% endif %}>24 hour + seconds</option>
+    </select>
+  </label>
+  <label class="field">Colon
+    <select id="ck-colon" data-clock="colon">
+      <option value="blink" {% if c.colon == 'blink' %}selected{% endif %}>Blink</option>
+      <option value="on" {% if c.colon == 'on' %}selected{% endif %}>Always on</option>
+      <option value="off" {% if c.colon == 'off' %}selected{% endif %}>Off</option>
+    </select>
+  </label>
+  <div id="ttf-only" {% if c.style != 'ttf' %}hidden{% endif %}>
+    <label class="field">Font (TTF)
+      <select id="ck-font" data-clock="font">
+        <option value="{{ c.font }}" selected>{{ c.font }}</option>
+      </select>
+    </label>
+    <label class="field">Font size <span class="live-val mono" id="ck-font-size-val">{{ c.font_size }}</span>
+      <input type="range" id="ck-font-size" data-clock="font_size" min="8" max="32" step="1" value="{{ c.font_size }}">
+    </label>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Color</h2>
+  <label class="field">Color mode
+    <select id="ck-color-mode" data-clock="color_mode">
+      <option value="tint" {% if c.color_mode == 'tint' %}selected{% endif %}>Follow DMD tint</option>
+      <option value="solid" {% if c.color_mode == 'solid' %}selected{% endif %}>Solid color</option>
+    </select>
+  </label>
+  <label class="field" id="solid-color-field" {% if c.color_mode != 'solid' %}hidden{% endif %}>Solid color
+    <input type="color" id="ck-color" data-clock="color" value="{{ clock_color_hex }}">
+  </label>
+  <label class="field">DMD color (global)
+    <select id="ck-tint">
+      {% for t in tints %}
+      <option value="{{ t }}" {% if cfg.display.tint == t %}selected{% endif %}>{{ t.replace('_', ' ') }}</option>
+      {% endfor %}
+      {% if not (cfg.display.tint is string) %}
+      <option value="custom" selected>custom RGB</option>
+      {% endif %}
+    </select>
+    <span class="hint">Recolors the whole DMD library, not just the clock.</span>
+  </label>
+  <label class="field">Shade <span class="live-val mono" id="ck-shade-val">{{ c.shade }}</span>
+    <input type="range" id="ck-shade" data-clock="shade" min="1" max="15" step="1" value="{{ c.shade }}">
+  </label>
+</section>
+
+<section class="card">
+  <h2>Position</h2>
+  <div class="field">Alignment
+    <div class="align-grid" id="align-grid">
+      {% for a in ['nw','n','ne','w','center','e','sw','s','se'] %}
+      <button type="button" class="align-btn{% if c.align == a %} active{% endif %}" data-align="{{ a }}" aria-label="{{ a }}"></button>
+      {% endfor %}
+    </div>
+    <input type="hidden" id="ck-align" data-clock="align" value="{{ c.align }}">
+  </div>
+  <div class="field-pair">
+    <label class="field">X offset
+      <input type="number" id="ck-x" data-clock="x" min="-128" max="128" step="1" value="{{ c.x }}">
+    </label>
+    <label class="field">Y offset
+      <input type="number" id="ck-y" data-clock="y" min="-32" max="32" step="1" value="{{ c.y }}">
+    </label>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Background &amp; effects</h2>
+  <label class="field">Background
+    <select id="ck-background" data-clock="background">
+      <option value="none" {% if c.background == 'none' %}selected{% endif %}>None (black)</option>
+      <option value="random" {% if c.background == 'random' %}selected{% endif %}>Random</option>
+      {% for b in backgrounds %}
+      <option value="{{ b }}" {% if c.background == b %}selected{% endif %}>{{ b }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="switch-row">
+    <span>Outline (readability over backgrounds)</span>
+    <span class="switch"><input type="checkbox" id="ck-outline" data-clock="outline"
+      {% if c.outline %}checked{% endif %}><span class="slider"></span></span>
+  </label>
+  <label class="field">Transition
+    <select id="ck-transition" data-clock="transition">
+      {% for value, label in transitions %}
+      <option value="{{ value }}" {% if c.transition == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">Clock dwell per cycle (ms)
+    <input type="number" id="ck-dwell" data-clock="idle_dwell_ms" min="500" max="60000" step="500" value="{{ c.idle_dwell_ms }}">
+  </label>
+</section>
+</div>
+
+<div class="save-bar">
+  <button class="btn btn-primary" id="clock-save">Save</button>
+  <button class="btn" id="clock-reset">Reset</button>
+</div>
+{% endblock %}

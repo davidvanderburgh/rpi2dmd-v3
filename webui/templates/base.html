@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}RPI2DMD{% endblock %} &middot; RPI2DMD v3</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body data-page="{{ active }}">
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/"><span class="brand-dot"></span>RPI2DMD<span class="brand-v">v3</span></a>
+    <nav class="nav">
+      {% for ep, path, label in nav %}
+      <a href="{{ path }}"{% if active == ep %} class="active"{% endif %}>{{ label }}</a>
+      {% endfor %}
+    </nav>
+  </div>
+</header>
+<main class="wrap">
+{% block content %}{% endblock %}
+</main>
+<div id="toast" class="toast" hidden></div>
+<script>window.CFG = {{ cfg|tojson }};</script>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

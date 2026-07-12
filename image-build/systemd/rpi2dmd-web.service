@@ -1,0 +1,15 @@
+[Unit]
+Description=RPI2DMD v3 web interface
+After=network.target rpi2dmd-player.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/rpi2dmd-v3/webui
+Environment=PYTHONPATH=/opt/rpi2dmd-v3/player
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/rpi2dmd-v3/webui/app.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

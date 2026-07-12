@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Network{% endblock %}
+{% block content %}
+{% set n = cfg.network %}
+{% set w = cfg.weather %}
+<h1>Network</h1>
+
+<form id="network-form" onsubmit="return false;">
+<div class="grid-2">
+<section class="card">
+  <h2>Device</h2>
+  <label class="field">Hostname
+    <input type="text" data-cfg="network.hostname" value="{{ n.hostname }}" maxlength="63" autocomplete="off">
+  </label>
+  <label class="field">Wi-Fi country
+    <input type="text" data-cfg="network.wifi_country" value="{{ n.wifi_country }}" maxlength="2" autocomplete="off" class="short">
+  </label>
+  <label class="field">Wi-Fi SSID
+    <input type="text" data-cfg="network.wifi_ssid" value="{{ n.wifi_ssid }}" maxlength="32" autocomplete="off">
+  </label>
+  <label class="field">Wi-Fi password
+    <span class="reveal-wrap">
+      <input type="password" id="wifi-psk" data-cfg="network.wifi_psk" value="{{ n.wifi_psk }}" maxlength="63" autocomplete="new-password">
+      <button type="button" class="btn btn-sm" id="psk-reveal">Show</button>
+    </span>
+  </label>
+  <label class="field">Timezone
+    <select data-cfg="network.timezone">
+      {% for tz in timezones %}
+      <option value="{{ tz }}" {% if n.timezone == tz %}selected{% endif %}>{{ tz }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <div class="note">Network changes apply on save. The device applies Wi-Fi and hostname changes at startup and may <b>reboot</b> to activate them.</div>
+</section>
+
+<section class="card">
+  <h2>Weather (OpenWeather)</h2>
+  <label class="switch-row">
+    <span>Weather scene enabled</span>
+    <span class="switch"><input type="checkbox" data-cfg="weather.enabled"
+      {% if w.enabled %}checked{% endif %}><span class="slider"></span></span>
+  </label>
+  <label class="field">API key
+    <input type="text" data-cfg="weather.api_key" value="{{ w.api_key }}" autocomplete="off" spellcheck="false">
+    <span class="hint">Free key from openweathermap.org.</span>
+  </label>
+  <div class="field-pair">
+    <label class="field">ZIP / postal code
+      <input type="text" data-cfg="weather.zip_code" value="{{ w.zip_code }}" maxlength="10" autocomplete="off">
+    </label>
+    <label class="field">Country
+      <input type="text" data-cfg="weather.country" value="{{ w.country }}" maxlength="2" autocomplete="off" class="short">
+    </label>
+  </div>
+  <label class="field">Units
+    <select data-cfg="weather.units">
+      <option value="imperial" {% if w.units == 'imperial' %}selected{% endif %}>Imperial (&deg;F)</option>
+      <option value="metric" {% if w.units == 'metric' %}selected{% endif %}>Metric (&deg;C)</option>
+    </select>
+  </label>
+  <label class="field">Refresh every (minutes)
+    <input type="number" data-cfg="weather.refresh_min" min="10" max="1440" step="5" value="{{ w.refresh_min }}">
+  </label>
+</section>
+</div>
+
+<div class="save-bar">
+  <button class="btn btn-primary" id="network-save">Save</button>
+</div>
+</form>
+{% endblock %}

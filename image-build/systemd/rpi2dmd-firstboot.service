@@ -1,0 +1,13 @@
+[Unit]
+Description=RPI2DMD v3 first boot: expand the media partition to fill the SD card
+ConditionPathExists=/boot/rpi2dmd-expand
+After=local-fs.target
+Before=rpi2dmd-player.service rpi2dmd-web.service smbd.service nmbd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rpi2dmd-expand.sh
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

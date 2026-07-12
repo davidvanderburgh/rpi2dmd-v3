@@ -100,7 +100,7 @@ class SimDriver(BaseDriver):
             (self.width * self.scale, self.height * self.scale), resample=0)
         path = path or os.path.join(self.out_dir, "latest.png")
         tmp = path + ".tmp"
-        img.save(tmp)
+        img.save(tmp, "PNG")  # explicit format: PIL can't infer from .tmp
         os.replace(tmp, path)
         return path
 

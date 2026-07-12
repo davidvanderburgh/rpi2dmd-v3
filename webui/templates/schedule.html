@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Schedule{% endblock %}
+{% block content %}
+{% set s = cfg.schedule %}
+<h1>Schedule</h1>
+
+<form id="schedule-form" onsubmit="return false;">
+<section class="card">
+  <h2>Sleep / wake</h2>
+  <label class="switch-row">
+    <span>Daily sleep schedule enabled</span>
+    <span class="switch"><input type="checkbox" data-cfg="schedule.enabled"
+      {% if s.enabled %}checked{% endif %}><span class="slider"></span></span>
+  </label>
+  <div class="field-pair">
+    <label class="field">Sleep at
+      <input type="time" data-cfg="schedule.sleep" value="{{ s.sleep }}">
+    </label>
+    <label class="field">Wake at
+      <input type="time" data-cfg="schedule.wake" value="{{ s.wake }}">
+    </label>
+  </div>
+  <span class="hint">The panel blanks between sleep and wake. Manual sleep/wake from the dashboard overrides until the next boundary.</span>
+</section>
+
+<section class="card">
+  <h2>Brightness by hour</h2>
+  <div class="btn-row">
+    <button class="btn btn-sm" id="preset-day" type="button">Day preset</button>
+    <button class="btn btn-sm" id="preset-night" type="button">Night preset</button>
+  </div>
+  <div class="bars-scroll">
+    <div class="bars" id="bright-bars">
+      {% for v in hours %}
+      <div class="bar-col">
+        <span class="bar-val mono">{{ v }}</span>
+        <input type="range" class="vert bright-hour" orient="vertical"
+               data-hour="{{ loop.index0 }}" min="0" max="100" step="5" value="{{ v }}">
+        <span class="bar-hour mono">{{ '%02d' % loop.index0 }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  <span class="hint">Percent brightness applied at the top of each hour (0 = panel dark).</span>
+</section>
+
+<div class="save-bar">
+  <button class="btn btn-primary" id="schedule-save">Save</button>
+</div>
+</form>
+{% endblock %}
