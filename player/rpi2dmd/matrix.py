@@ -120,16 +120,31 @@ class SimDriver(BaseDriver):
                 durations.append(max(20, int((frames[i + 1][1] - ts) * 1000)))
             else:
                 durations.append(100)
-        images[0].save(path, save_all=True, append_images=images[1:],
-                       duration=durations, loop=0)
+        try:
+            images[0].save(path, save_all=True, append_images=images[1:],
+                           duration=durations, loop=0)
+        except TypeError:
+            # Pillow 5.4: frames collapsed to one, duration list unsupported
+            images[0].save(path, duration=sum(durations))
         return path
 
 
 def create_driver(cfg, sim=False, **sim_kwargs):
+    import platform
+    import sys
+
     if sim:
         return SimDriver(cfg, **sim_kwargs)
     try:
         return RgbMatrixDriver(cfg)
-    except ImportError:
-        # rgbmatrix bindings absent (dev machine): fall back to simulator
+    except ImportError as e:
+        if platform.system() == "Linux" and platform.machine().startswith(
+                ("arm", "aarch")):
+            # On the actual device a missing rgbmatrix binding is fatal —
+            # a silent simulator fallback would leave the panel dark while
+            # everything reports healthy.
+            raise RuntimeError(
+                "rgbmatrix bindings unavailable on device: %s" % e)
+        print("rpi2dmd: rgbmatrix not available (%s); using simulator"
+              % e, file=sys.stderr)
         return SimDriver(cfg, **sim_kwargs)

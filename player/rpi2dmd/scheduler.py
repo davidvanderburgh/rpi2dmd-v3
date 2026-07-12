@@ -10,6 +10,7 @@ are logged and swallowed so the appliance never dies.
 Python 3.7 compatible.
 """
 
+import collections
 import datetime
 import os
 import random
@@ -20,6 +21,13 @@ import traceback
 from PIL import Image
 
 from . import paths, scenes, transitions
+
+
+def _safe_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 MESSAGE_FREQ_S = {"1s": 1, "5s": 5, "15s": 15, "30s": 30, "1m": 60, "5m": 300}
 WEATHER_SHOW_INTERVAL_S = 3600
@@ -79,7 +87,8 @@ class Scheduler(object):
                     pass
         self.canvas = (driver.width, driver.height)
         self.frames_shown = 0
-        self.scene_log = []       # scene identifiers, for tests/debugging
+        # scene identifiers, for tests/debugging (bounded: 24/7 appliance)
+        self.scene_log = collections.deque(maxlen=1000)
         self._sim_now = time.time()
         self._last_snapshot = 0.0
         self._last_hour = None
@@ -140,6 +149,10 @@ class Scheduler(object):
         except Exception:
             sys.stderr.write("scene %r failed:\n" % (state_name,))
             traceback.print_exc()
+        finally:
+            # consume a skip that landed at the very end of the scene so it
+            # cannot leak into (and instantly cancel) the next scene
+            st.take_skip()
 
     def _pause_gate(self, resume_state):
         """Blank the panel and hold while paused. -> False if stopping."""
@@ -198,7 +211,10 @@ class Scheduler(object):
                 self._backgrounds = scenes.scan_backgrounds()
             except Exception:
                 traceback.print_exc()
-            st.set_counts(self.library.counts(self.cfg))
+            try:
+                st.set_counts(self.library.counts(self.cfg))
+            except Exception:
+                traceback.print_exc()
         self._apply_brightness()
         st.tick()
 
@@ -228,7 +244,10 @@ class Scheduler(object):
             if not (ov == "sleep" or (window and ov != "wake")):
                 break
             st.take_skip()  # skip is meaningless while sleeping
-            self.driver.show(black)
+            try:
+                self.driver.show(black)
+            except Exception:
+                traceback.print_exc()
             self.frames_shown += 1
             self._maybe_snapshot()
             st.tick()
@@ -323,7 +342,7 @@ class Scheduler(object):
             if gap_seconds is not None:
                 dwell = int(gap_seconds * 1000)
             else:
-                dwell = int(cfg.get("clock.idle_dwell_ms", 6000))
+                dwell = _safe_int(cfg.get("clock.idle_dwell_ms", 6000), 6000)
             sc = scenes.clock_scene(cfg, self.canvas, dwell,
                                     self._backgrounds, rng=self.rng)
             sc = transitions.wrap(sc, cfg.get("clock.transition", "random"),
@@ -340,12 +359,13 @@ class Scheduler(object):
     def _interleaves(self):
         cfg = self.cfg
         st = self.state
-        every = int(cfg.get("date.every_n_cycles", 4) or 0)
+        every = _safe_int(cfg.get("date.every_n_cycles", 4) or 0, 4)
         if cfg.get("date.enabled", True) and every > 0 \
                 and self._cycle % every == 0:
             np = {"type": "clock", "game": "", "name": "date",
                   "started_at": time.time(),
-                  "duration_ms": int(cfg.get("date.dwell_ms", 2500))}
+                  "duration_ms": _safe_int(cfg.get("date.dwell_ms", 2500),
+                                           2500)}
             self.play_scene(scenes.date_scene(cfg, self.canvas), "clock",
                             np, log="date")
         if st.stop_requested:
@@ -356,7 +376,8 @@ class Scheduler(object):
             self._last_weather = self._now()
             np = {"type": "clock", "game": "", "name": "weather",
                   "started_at": time.time(),
-                  "duration_ms": int(cfg.get("weather.dwell_ms", 3500))}
+                  "duration_ms": _safe_int(cfg.get("weather.dwell_ms", 3500),
+                                           3500)}
             self.play_scene(scenes.weather_scene(cfg, wdata, self.canvas),
                             "clock", np, log="weather")
         if st.stop_requested:
@@ -396,56 +417,77 @@ class Scheduler(object):
     # -- main loop -----------------------------------------------------------
     def run(self):
         st = self.state
-        st.set_counts(self.library.counts(self.cfg))
+        try:
+            st.set_counts(self.library.counts(self.cfg))
+        except Exception:
+            traceback.print_exc()
         try:
             self._maybe_show_ip()
         except Exception:
             traceback.print_exc()
         while not st.stop_requested:
-            self._boundary()
-            if self._sleep_gate():
-                continue
-            if st.stop_requested:
-                break
-            if st.take_test():
-                np = {"type": "clock", "game": "", "name": "test_pattern",
-                      "started_at": time.time(), "duration_ms": 0}
-                self.play_scene(scenes.test_scene(self.cfg, self.canvas),
-                                "test", np)
-                continue
-            marquee = st.take_marquee()
-            if marquee is not None:
-                np = {"type": "message", "game": "", "name": marquee,
-                      "started_at": time.time(), "duration_ms": 0}
-                self.play_scene(
-                    scenes.message_scene(self.cfg, text_override=marquee,
-                                         canvas=self.canvas, rng=self.rng),
-                    "message", np, log="marquee")
-                continue
-            queued = st.take_play()
-            if queued is not None:
-                self._play_queued(queued)
-                continue
+            try:
+                self._run_once()
+            except Exception:
+                # Catch-all: a hand-edited config (SMB) or transient error
+                # must never turn the daemon into a systemd crash loop.
+                traceback.print_exc()
+                if not self.fast:
+                    time.sleep(1.0)
+                else:
+                    self._advance_ms(1000)
+                    if self.max_frames is not None \
+                            and self.frames_shown >= self.max_frames:
+                        st.request_stop()
 
-            gap = self.cfg.animation_gap_seconds(self.rng)
-            self._play_clock_cycle(gap)
-            if st.stop_requested:
-                break
-            self._cycle += 1
-            self._interleaves()
-            if st.stop_requested:
-                break
-            if gap is None:
-                continue  # animations disabled: clock forever
-            queued = st.take_play()
-            if queued is not None:
-                self._play_queued(queued)
-                continue
-            picked = self._pick_animation()
-            if picked is None:
-                continue
-            kind, item = picked
-            if kind == "dmd":
-                self._play_dmd(*item)
-            else:
-                self._play_gif(*item)
+    def _run_once(self):
+        st = self.state
+        self._boundary()
+        if self._sleep_gate():
+            return
+        if st.stop_requested:
+            return
+        if st.take_test():
+            np = {"type": "clock", "game": "", "name": "test_pattern",
+                  "started_at": time.time(), "duration_ms": 0}
+            self.play_scene(scenes.test_scene(self.cfg, self.canvas),
+                            "test", np)
+            return
+        marquee = st.take_marquee()
+        if marquee is not None:
+            np = {"type": "message", "game": "", "name": marquee,
+                  "started_at": time.time(), "duration_ms": 0}
+            self.play_scene(
+                scenes.message_scene(self.cfg, text_override=marquee,
+                                     canvas=self.canvas, rng=self.rng),
+                "message", np, log="marquee")
+            return
+        queued = st.take_play()
+        if queued is not None:
+            st.take_skip()  # play sets skip to kill the previous scene
+            self._play_queued(queued)
+            return
+
+        gap = self.cfg.animation_gap_seconds(self.rng)
+        self._play_clock_cycle(gap)
+        if st.stop_requested:
+            return
+        self._cycle += 1
+        self._interleaves()
+        if st.stop_requested:
+            return
+        if gap is None:
+            return  # animations disabled: clock forever
+        queued = st.take_play()
+        if queued is not None:
+            st.take_skip()
+            self._play_queued(queued)
+            return
+        picked = self._pick_animation()
+        if picked is None:
+            return
+        kind, item = picked
+        if kind == "dmd":
+            self._play_dmd(*item)
+        else:
+            self._play_gif(*item)

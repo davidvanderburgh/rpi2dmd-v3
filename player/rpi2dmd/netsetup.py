@@ -9,6 +9,7 @@ Python 3.7 compatible; stdlib only.
 """
 
 import os
+import re
 import subprocess
 import sys
 
@@ -16,6 +17,15 @@ WPA_CONF = "/etc/wpa_supplicant/wpa_supplicant.conf"
 HOSTNAME_FILE = "/etc/hostname"
 HOSTS_FILE = "/etc/hosts"
 TIMEZONE_FILE = "/etc/timezone"
+
+# RFC1123 single label: letters/digits/hyphens, no leading/trailing hyphen
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+
+def _wpa_safe(value):
+    """True if a value can be embedded in a quoted wpa_supplicant string:
+    no control characters (newline injection) and no double quotes."""
+    return not any(ch in value for ch in "\"\r\n\x00") and value.isprintable()
 
 WPA_TEMPLATE = """ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
 update_config=1
@@ -50,6 +60,9 @@ def _apply_hostname(net):
     hostname = str(net.get("hostname", "") or "").strip()
     if not hostname or not os.path.exists(HOSTNAME_FILE):
         return False
+    if not _HOSTNAME_RE.match(hostname):
+        sys.stderr.write("network: invalid hostname %r ignored\n" % hostname)
+        return False
     current = (_read(HOSTNAME_FILE) or "").strip()
     if current == hostname:
         return False
@@ -67,7 +80,13 @@ def _apply_wifi(net):
     if not ssid or not os.path.exists(WPA_CONF):
         return False
     psk = str(net.get("wifi_psk", "") or "")
-    country = str(net.get("wifi_country", "US") or "US")
+    country = str(net.get("wifi_country", "US") or "US").upper()
+    if not _wpa_safe(ssid) or not _wpa_safe(psk):
+        sys.stderr.write("network: SSID/PSK contains characters that cannot "
+                         "be written safely (quote/control); ignored\n")
+        return False
+    if not re.match(r"^[A-Z]{2}$", country):
+        country = "US"
     if psk:
         key_line = 'psk="%s"' % psk
     else:

@@ -152,11 +152,19 @@ def _fit_cover(img, w, h, resample=Image.BILINEAR):
     return img.crop((x0, y0, x0 + w, y0 + h))
 
 
-def _load_image_frames(path):
+# A 128x32 panel never needs huge sources; reject decompression bombs and
+# keep memory bounded on a Pi (frames are downscaled as they are decoded).
+Image.MAX_IMAGE_PIXELS = 32 * 1024 * 1024
+MAX_GIF_FRAMES = 1200
+
+
+def _load_image_frames(path, target=None):
     """Load a (possibly animated) image -> list of (RGB image, duration_ms).
 
     Frames are composited over the previous frame so partial/transparent
-    GIF frames render correctly.
+    GIF frames render correctly. When target=(w, h) is given, each frame is
+    cover-fitted to that size as it is decoded, so a large source GIF never
+    holds full-resolution frames in memory.
     """
     img = Image.open(path)
     frames = []
@@ -171,9 +179,17 @@ def _load_image_frames(path):
         if base is None:
             base = Image.new("RGBA", img.size, (0, 0, 0, 255))
         base.paste(fr, (0, 0), fr)
-        frames.append((base.convert("RGB"), dur))
+        out = base.convert("RGB")
+        if target is not None:
+            out = _fit_cover(out, target[0], target[1])
+        frames.append((out, dur))
+        if len(frames) >= MAX_GIF_FRAMES:
+            break
     if not frames:
-        frames = [(img.convert("RGB"), GIF_DEFAULT_FRAME_MS)]
+        out = img.convert("RGB")
+        if target is not None:
+            out = _fit_cover(out, target[0], target[1])
+        frames = [(out, GIF_DEFAULT_FRAME_MS)]
     return frames
 
 
@@ -301,9 +317,8 @@ def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None):
     bg_path = _resolve_background(ck, backgrounds, rng)
     if bg_path:
         try:
-            bg_frames = [(_fit_cover(img, w, h), dur)
-                         for img, dur in _load_image_frames(bg_path)]
-        except (OSError, ValueError):
+            bg_frames = _load_image_frames(bg_path, target=(w, h))
+        except (OSError, ValueError, Image.DecompressionBombError):
             bg_frames = None
 
     elapsed = 0
@@ -422,8 +437,7 @@ def gif_scene(cfg, path, canvas=CANVAS):
     """Play a GIF file: per-frame durations, cover-scale to the canvas,
     single pass (looped until >= 1.5s total), optional clock overlay."""
     w, h = canvas
-    frames = [(_fit_cover(img, w, h), dur)
-              for img, dur in _load_image_frames(path)]
+    frames = _load_image_frames(path, target=(w, h))
     total = sum(dur for _, dur in frames)
     passes = 1
     if total > 0:
@@ -685,9 +699,8 @@ def boot_splash_scene(cfg, canvas=CANVAS):
         path = os.path.join(paths.fonts_dir(), "_Rpi2DmdLogo.gif")
         if os.path.isfile(path):
             try:
-                frames = [(_fit_cover(img, w, h), dur)
-                          for img, dur in _load_image_frames(path)]
-            except (OSError, ValueError):
+                frames = _load_image_frames(path, target=(w, h))
+            except (OSError, ValueError, Image.DecompressionBombError):
                 frames = []
             total = 0
             for img, dur in frames:

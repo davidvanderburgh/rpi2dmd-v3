@@ -25,6 +25,8 @@ import re
 import socket
 import subprocess
 import sys
+import threading
+import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 for _cand in ("/opt/rpi2dmd-v3/player",
@@ -447,8 +449,13 @@ def _validate(node, defaults, prefix=""):
 
 _CLAMPS = [
     (("clock", "shade"), 1, 15),
+    (("clock", "font_size"), 4, 64),
     (("playback", "dmd_share"), 0, 100),
     (("panel", "pwm_bits"), 1, 11),
+    (("panel", "cols"), 8, 256),
+    (("panel", "rows"), 8, 128),
+    (("panel", "chain"), 1, 12),
+    (("panel", "parallel"), 1, 3),
     (("web", "port"), 1, 65535),
 ]
 
@@ -564,7 +571,17 @@ def api_status():
         with open(paths.status_path(), "r", encoding="utf-8") as f:
             doc = json.load(f)
         if isinstance(doc, dict):
-            doc.setdefault("state", "offline")
+            # the player heartbeats status.json every <=5s; anything much
+            # older is a dead player, not live state
+            try:
+                age = time.time() - float(doc.get("updated_at", 0))
+            except (TypeError, ValueError):
+                age = None
+            if age is None or age > 15:
+                doc["state"] = "offline"
+                doc["stale"] = True
+            else:
+                doc.setdefault("state", "offline")
             return jsonify(doc)
     except (OSError, ValueError):
         pass
@@ -651,6 +668,11 @@ def api_preview_clock():
             cfg_clock[key] = _coerce_like(value, default, "clock." + key)
         except ValueError:
             pass
+    try:
+        cfg_clock["font_size"] = max(4, min(64, int(
+            cfg_clock.get("font_size", 20))))
+    except (TypeError, ValueError):
+        cfg_clock["font_size"] = 20
     background = _load_background(cfg_clock.get("background", "none"))
     frame = clock.render_scene(cfg_clock, 128, 32, background=background,
                                tint=tint, gamma=gamma,
@@ -691,14 +713,56 @@ def api_preview_anim(game, name):
         game, name, tint_key, int(os.path.getmtime(rda_path)))
     cache_path = os.path.join(cache_dir, cache_name)
     if not os.path.isfile(cache_path):
-        # Pillow picks the output format from the extension, so the
-        # temp file must end in .gif too (atomic-rename into place).
-        tmp = cache_path + ".tmp.gif"
-        rda.rda_to_gif(rda_path, tmp, tint=tint_val, gamma=gamma, scale=2)
-        os.replace(tmp, cache_path)
+        _prune_preview_cache(cache_dir)
+        # Pillow picks the output format from the extension, so the temp
+        # file must end in .gif; unique per request so concurrent renders
+        # of the same animation cannot corrupt each other.
+        tmp = "%s.%d.%d.tmp.gif" % (cache_path, os.getpid(),
+                                    threading.get_ident())
+        try:
+            rda.rda_to_gif(rda_path, tmp, tint=tint_val, gamma=gamma,
+                           scale=2)
+            os.replace(tmp, cache_path)
+        except Exception:
+            # corrupt/truncated .rda on the SMB-writable partition
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            abort(404)
     resp = send_file(cache_path, mimetype="image/gif")
     resp.headers["Cache-Control"] = "public, max-age=31536000"
     return resp
+
+
+_PREVIEW_CACHE_MAX_BYTES = 16 * 1024 * 1024  # /run is RAM-backed tmpfs
+
+
+def _prune_preview_cache(cache_dir, max_bytes=_PREVIEW_CACHE_MAX_BYTES):
+    """Keep the preview cache bounded: evict oldest files beyond the cap."""
+    try:
+        entries = []
+        total = 0
+        for e in os.scandir(cache_dir):
+            if not e.is_file():
+                continue
+            st = e.stat()
+            entries.append((st.st_mtime, st.st_size, e.path))
+            total += st.st_size
+        if total <= max_bytes:
+            return
+        entries.sort()
+        for _mt, size, p in entries:
+            try:
+                os.remove(p)
+                total -= size
+            except OSError:
+                pass
+            if total <= max_bytes // 2:
+                break
+    except OSError:
+        pass
 
 
 @app.route("/api/preview/gif/<category>/<filename>")
@@ -857,7 +921,17 @@ def api_restore():
     if not isinstance(doc, dict):
         return jsonify({"ok": False,
                         "error": "config must be a JSON object"}), 400
-    CFG.data = config.deep_merge(config.DEFAULTS, doc)
+    unknown = [k for k in doc if k not in config.DEFAULTS]
+    if unknown:
+        return jsonify({"ok": False, "error": "unknown config section(s): %s"
+                        % ", ".join(sorted(unknown))}), 400
+    merged = config.deep_merge(config.DEFAULTS, doc)
+    try:
+        merged = _validate(merged, config.DEFAULTS)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    _apply_clamps(merged)
+    CFG.data = merged
     CFG.save()
     player = ctl.send("reload_config")
     return jsonify({"ok": True, "player": player})

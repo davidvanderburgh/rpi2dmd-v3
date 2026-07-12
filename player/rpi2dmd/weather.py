@@ -20,6 +20,7 @@ from . import paths
 API_URL = "https://api.openweathermap.org/data/2.5/weather"
 FETCH_TIMEOUT_S = 10
 CACHE_MAX_AGE_S = 24 * 3600
+STALE_MAX_AGE_S = 3 * 3600   # don't display readings older than this
 
 
 def fetch(cfg):
@@ -74,7 +75,16 @@ class WeatherService(object):
         self._stop.set()
 
     def data(self):
-        return self._data
+        """Latest result, or None once it is too stale to show (network
+        loss must not leave hours-old readings on the panel)."""
+        doc = self._data
+        if doc is None:
+            return None
+        try:
+            age = time.time() - float(doc.get("fetched_at", 0))
+        except (TypeError, ValueError):
+            return None
+        return doc if age <= STALE_MAX_AGE_S else None
 
     # -- internals ---------------------------------------------------------
     def _load_cache(self):

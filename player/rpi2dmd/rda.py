@@ -169,6 +169,8 @@ def rda_to_gif(path_or_pair, out_path, tint=DEFAULT_TINT, gamma=DEFAULT_GAMMA,
         header, frames = path_or_pair
     else:
         header, frames = read_rda(path_or_pair)
+    if not frames:
+        raise ValueError("animation has no frames")
     palette = build_palette(tint, gamma)
     images = []
     durations = []
@@ -178,12 +180,22 @@ def rda_to_gif(path_or_pair, out_path, tint=DEFAULT_TINT, gamma=DEFAULT_GAMMA,
             img = img.resize((WIDTH * scale, HEIGHT * scale), resample=0)  # NEAREST
         images.append(img)
         durations.append(max(int(dur), min_duration_ms))
-    images[0].save(
-        out_path,
-        save_all=True,
-        append_images=images[1:],
-        duration=durations,
-        loop=0,
-        optimize=False,
-        disposal=1,
-    )
+    if len(images) == 1 or len(set(frames)) == 1:
+        # Single (or all-identical) frame: Pillow 5.4 dies on a duration
+        # list when the GIF writer collapses to one frame.
+        images[0].save(out_path, duration=sum(durations), optimize=False)
+        return
+    try:
+        images[0].save(
+            out_path,
+            save_all=True,
+            append_images=images[1:],
+            duration=durations,
+            loop=0,
+            optimize=False,
+            disposal=1,
+        )
+    except TypeError:
+        # Pillow 5.4: identical consecutive frames collapsed to one and the
+        # single-frame writer divided our duration list by 10.
+        images[0].save(out_path, duration=sum(durations), optimize=False)

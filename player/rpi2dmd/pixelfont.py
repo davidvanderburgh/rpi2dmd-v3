@@ -175,15 +175,28 @@ def digital_font(size="large", colon_on=True):
 
 
 _rundmd_cache = {}
+_fallback_noted = [False]
 
 
 def rundmd_font(size="large", colon_on=True):
-    """Authentic Run-DMD glyphs from assets/glyphs.json, or None if absent."""
+    """Authentic Run-DMD glyphs from assets/glyphs.json, or None if absent.
+
+    The Run-DMD clock digits live in the original board's MCU firmware,
+    not on its SD card, so unless a glyphs.json has been produced some
+    other way this returns None and style "rundmd" renders with the
+    built-in 7-segment font (visually equivalent to style "digital").
+    """
     key = (size, colon_on)
     if key in _rundmd_cache:
         return _rundmd_cache[key]
     path = os.path.join(_ASSETS, "glyphs.json")
     font = None
+    if not os.path.exists(path) and not _fallback_noted[0]:
+        _fallback_noted[0] = True
+        import sys
+        sys.stderr.write(
+            "rpi2dmd: no assets/glyphs.json; clock style 'rundmd' uses the "
+            "built-in 7-segment digits\n")
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:

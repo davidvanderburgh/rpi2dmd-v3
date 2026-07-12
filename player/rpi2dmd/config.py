@@ -189,12 +189,27 @@ class Config(object):
             try:
                 with open(self.path, "r", encoding="utf-8") as f:
                     user = json.load(f)
-                self._mtime = os.path.getmtime(self.path)
+                if not isinstance(user, dict):
+                    user = {}
             except (ValueError, OSError):
-                # corrupt config: keep defaults, don't crash the appliance
-                user = {}
+                # corrupt/mid-edit config: keep the previous good data (or
+                # defaults on first load), don't crash the appliance
+                user = None
+            try:
+                # remember the mtime even when parsing failed, so a corrupt
+                # file is not re-read at every scene boundary
+                self._mtime = os.path.getmtime(self.path)
+            except OSError:
+                pass
+            if user is None:
+                return self
         elif os.path.exists(paths.v2_config_path()):
-            user = migrate_v2(paths.v2_config_path())
+            try:
+                user = migrate_v2(paths.v2_config_path())
+                if not isinstance(user, dict):
+                    user = {}
+            except (ValueError, OSError):
+                user = {}
         self.data = deep_merge(DEFAULTS, user)
         return self
 
@@ -207,6 +222,8 @@ class Config(object):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=1, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())  # FAT32 + power cuts: land it on disk
             os.replace(tmp, self.path)
         finally:
             if os.path.exists(tmp):
@@ -233,7 +250,7 @@ class Config(object):
 
     def animation_gap_seconds(self, rng):
         """Clock-only gap between animations, or None if animations off."""
-        freq = self.get("playback.frequency", "random_1_20")
+        freq = str(self.get("playback.frequency", "random_1_20"))
         if freq == "off" or not self.get("playback.animations_enabled", True):
             return None
         if freq == "random_1_20":
