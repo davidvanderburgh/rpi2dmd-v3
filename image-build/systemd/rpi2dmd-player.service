@@ -8,6 +8,10 @@ WorkingDirectory=/opt/rpi2dmd-v3/player
 Environment=PYTHONPATH=/opt/rpi2dmd-v3/player
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 -m rpi2dmd.main
+# The display is the product: the render loop must hit its frame deadlines
+# even while the web UI is being used, or animations visibly stutter. The
+# loop sleeps between frames anyway, so the web still gets the idle time.
+Nice=-5
 Restart=always
 RestartSec=3
 

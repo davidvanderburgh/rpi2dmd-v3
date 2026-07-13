@@ -41,6 +41,12 @@ def status_path():
     return os.path.join(run_dir(), "status.json")
 
 
+def ui_active_path():
+    """Touched by the web UI on every request; the player watches its mtime
+    and backs off while someone is actually using the interface."""
+    return os.path.join(run_dir(), "ui_active")
+
+
 def control_socket_path():
     return os.path.join(run_dir(), "control.sock")
 

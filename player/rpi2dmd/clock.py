@@ -15,9 +15,14 @@ Python 3.7 / Pillow 5.4 compatible (no ImageDraw stroke_width).
 import datetime
 import os
 
-from . import pixelfont, rda
+from . import paths, pixelfont, rda
 
-FONTS_DIR = "/media/usb/fonts"
+
+def _fonts_dir():
+    return paths.fonts_dir()
+
+
+FONTS_DIR = _fonts_dir()
 
 FORMATS = {
     "12h":      ("%I:%M", False),
@@ -110,29 +115,39 @@ def render_indexed(cfg_clock, canvas_w=128, canvas_h=32, now=None,
 
     key = (text, suffix, colon_on, shade, canvas_w, canvas_h, size_hint,
            override_xy, cfg_clock.get("style"), cfg_clock.get("align"),
-           cfg_clock.get("x"), cfg_clock.get("y"))
+           cfg_clock.get("x"), cfg_clock.get("y"),
+           cfg_clock.get("font"), cfg_clock.get("font_size"))
     hit = _grid_cache.get(key)
     if hit is not None:
         return hit
 
-    font = _bitmap_font(cfg_clock, size_hint, colon_on)
-    tw, th = font.measure(text)
-    sw = 0
-    sfont = None
-    if suffix:
-        sfont = pixelfont.BitmapFont(
-            {c: pixelfont.tiny_letter(c) for c in "APM"}, 5)
-        sw = sfont.measure(suffix)[0] + 2
-    x, y = _place(canvas_w, canvas_h, tw + sw, th, cfg_clock, override_xy)
-
     level = max(0.0, min(1.0, shade / 15.0))
 
-    grid = [[0] * canvas_w for _ in range(canvas_h)]
-    font.draw(grid, text, x, y, scale_level=level)
-    if sfont is not None:
-        sfont.draw(grid, suffix, x + tw + 2, y + th - 5, scale_level=level)
+    if cfg_clock.get("style") == "ttf":
+        # Honor the chosen TTF here too, so the clock drawn over animations
+        # matches the standalone clock scene instead of silently falling
+        # back to the pixel digits.
+        grid, bbox = _render_ttf_indexed(cfg_clock, canvas_w, canvas_h, text,
+                                         suffix, level, override_xy)
+    else:
+        font = _bitmap_font(cfg_clock, size_hint, colon_on)
+        tw, th = font.measure(text)
+        sw = 0
+        sfont = None
+        if suffix:
+            sfont = pixelfont.BitmapFont(
+                {c: pixelfont.tiny_letter(c) for c in "APM"}, 5)
+            sw = sfont.measure(suffix)[0] + 2
+        x, y = _place(canvas_w, canvas_h, tw + sw, th, cfg_clock, override_xy)
 
-    result = (grid, (x, y, tw + sw, th))
+        grid = [[0] * canvas_w for _ in range(canvas_h)]
+        font.draw(grid, text, x, y, scale_level=level)
+        if sfont is not None:
+            sfont.draw(grid, suffix, x + tw + 2, y + th - 5,
+                       scale_level=level)
+        bbox = (x, y, tw + sw, th)
+
+    result = (grid, bbox)
     if len(_grid_cache) >= _GRID_CACHE_MAX:
         _grid_cache.clear()
         _sparse_cache.clear()   # keyed by id(grid); must not outlive them
@@ -147,6 +162,36 @@ def grid_to_mask(grid):
     w = len(grid[0]) if h else 0
     return Image.frombytes(
         "L", (w, h), bytes(bytearray(v for row in grid for v in row)))
+
+
+def _render_ttf_indexed(cfg_clock, canvas_w, canvas_h, text, suffix, level,
+                        override_xy):
+    """Rasterize the configured TTF into a 0..15 intensity grid."""
+    from PIL import Image, ImageDraw
+
+    if suffix:
+        text = text + " " + suffix
+    font = _load_ttf(cfg_clock, _fonts_dir())
+    img = Image.new("L", (canvas_w, canvas_h), 0)
+    draw = ImageDraw.Draw(img)
+    try:
+        x0, y0, x1, y1 = draw.textbbox((0, 0), text, font=font)
+        tw, th = x1 - x0, y1 - y0
+    except AttributeError:  # Pillow < 8
+        tw, th = draw.textsize(text, font=font)
+        x0 = y0 = 0
+    x, y = _place(canvas_w, canvas_h, tw, th, cfg_clock, override_xy)
+    draw.text((x - x0, y - y0), text, font=font, fill=255)
+
+    px = img.load()
+    grid = [[0] * canvas_w for _ in range(canvas_h)]
+    for gy in range(canvas_h):
+        row = grid[gy]
+        for gx in range(canvas_w):
+            v = px[gx, gy]
+            if v:
+                row[gx] = max(1, int(round(v / 255.0 * 15.0 * level)))
+    return grid, (x, y, tw, th)
 
 
 # The clock lights only a few hundred of the 4096 pixels, so walking the
@@ -237,12 +282,14 @@ def _text_color(cfg_clock, tint, gamma):
 
 def render_scene(cfg_clock, canvas_w=128, canvas_h=32, now=None,
                  background=None, tint=rda.DEFAULT_TINT,
-                 gamma=rda.DEFAULT_GAMMA, fonts_dir=FONTS_DIR,
+                 gamma=rda.DEFAULT_GAMMA, fonts_dir=None,
                  draw_outline=None):
     """Full-color clock frame. background: optional PIL RGB image (already
     sized) e.g. a frame of an animated background GIF."""
     from PIL import Image, ImageDraw
 
+    if fonts_dir is None:
+        fonts_dir = _fonts_dir()
     now = now or datetime.datetime.now()
     if background is not None:
         frame = background.convert("RGB")

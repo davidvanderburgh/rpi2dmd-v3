@@ -8,6 +8,7 @@ Python 3.7 compatible.
 """
 
 import os
+import sys
 import time
 
 
@@ -56,7 +57,19 @@ class RgbMatrixDriver(BaseDriver):
     def show(self, image):
         if image.mode != "RGB":
             image = image.convert("RGB")
-        self._canvas.SetImage(image)
+        if image.size != (self.width, self.height):
+            # The bindings index straight into the buffer; a wrong-sized
+            # frame makes them compute a negative length and raise
+            # OverflowError, which would kill the whole scene.
+            image = image.resize((self.width, self.height))
+        try:
+            self._canvas.SetImage(image)
+        except (OverflowError, ValueError) as e:
+            # One bad frame must not abort the animation.
+            sys.stderr.write(
+                "matrix: dropped frame (%s) size=%r mode=%r\n"
+                % (e, image.size, image.mode))
+            return
         self._canvas = self._matrix.SwapOnVSync(self._canvas)
 
     def set_brightness(self, percent):

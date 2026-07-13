@@ -15,12 +15,89 @@ import datetime
 import os
 import random
 import sys
+import threading
 import time
 import traceback
 
 from PIL import Image
 
-from . import paths, scenes, transitions
+from . import paths, rda, scenes, transitions
+
+
+class Prefetcher(object):
+    """Loads the next animation in the background while the clock is up.
+
+    Reading an .rda (or decoding a 1.8MB GIF) off the SD card takes long
+    enough on a Pi Zero to leave the panel black between scenes. Doing it
+    during the clock scene removes that dead space entirely.
+    """
+
+    def __init__(self, canvas):
+        self.canvas = canvas
+        self._lock = threading.Lock()
+        self._pick = None       # ("dmd"|"gif", item tuple)
+        self._data = None       # loaded payload for that pick
+        self._thread = None
+
+    def start(self, pick):
+        """Begin loading `pick` in the background (no-op if already loading
+        the same thing)."""
+        if pick is None:
+            return
+        with self._lock:
+            if self._pick == pick and (self._data is not None
+                                       or self._thread is not None):
+                return
+            self._pick = pick
+            self._data = None
+            self._thread = threading.Thread(
+                target=self._load, args=(pick,), name="prefetch")
+            self._thread.daemon = True
+            self._thread.start()
+
+    def _load(self, pick):
+        try:
+            # Linux nice() is per-thread: keep this off the render loop's back
+            # so decoding the next animation can't jitter the clock's blink.
+            os.nice(10)
+        except (OSError, AttributeError):
+            pass
+        try:
+            kind, item = pick
+            if kind == "dmd":
+                header, frames = rda.read_rda(item[2])
+                # Unpacking 4bpp -> indexes is the render loop's most
+                # expensive per-frame step; do it here instead.
+                indexes = [rda.unpack_frame(f) for f in frames]
+                payload = (header, frames, indexes)
+            else:
+                payload = scenes.load_gif_frames(item[2], self.canvas)
+        except Exception:
+            traceback.print_exc()
+            payload = None
+        with self._lock:
+            if self._pick == pick:      # still the item we want
+                self._data = payload
+                self._thread = None
+
+    def take(self, pick, timeout=6.0):
+        """-> loaded payload for `pick`, waiting briefly if it is still in
+        flight; None means "load it yourself"."""
+        with self._lock:
+            same = (self._pick == pick)
+            thread = self._thread
+            data = self._data
+        if not same:
+            return None
+        if data is None and thread is not None:
+            thread.join(timeout)
+            with self._lock:
+                data = self._data if self._pick == pick else None
+        with self._lock:
+            if self._pick == pick:
+                self._pick = None
+                self._data = None
+        return data
 
 
 def _safe_int(value, default):
@@ -32,6 +109,10 @@ def _safe_int(value, default):
 MESSAGE_FREQ_S = {"1s": 1, "5s": 5, "15s": 15, "30s": 30, "1m": 60, "5m": 300}
 WEATHER_SHOW_INTERVAL_S = 3600
 SNAPSHOT_INTERVAL_S = 2.0
+MIN_FRAME_S = 0.02        # never pace faster than 50fps
+MAX_LAG_S = 0.25          # beyond this we resync rather than catch up
+NICE_NORMAL = -5          # display first: hit frame deadlines
+NICE_WEB_ACTIVE = 15      # someone is using the web UI: get out of its way
 
 
 def _blank_scene(canvas, total_ms, tick_ms=500):
@@ -97,6 +178,10 @@ class Scheduler(object):
         self._last_weather = 0.0
         self._cycle = 0
         self._backgrounds = scenes.scan_backgrounds()
+        self.prefetch = Prefetcher(self.canvas)
+        self._ui_checked_at = 0.0
+        self._ui_active = False
+        self._nice_now = None
 
     # -- time --------------------------------------------------------------
     def _now(self):
@@ -110,15 +195,18 @@ class Scheduler(object):
         if self.fast:
             self._advance_ms(ms)
             return
-        end = time.time() + ms / 1000.0
+        self._sleep_until(time.time() + ms / 1000.0)
+
+    def _sleep_until(self, deadline):
+        """Sleep until an absolute deadline, waking early for control flags."""
         st = self.state
         while True:
             if st.stop_requested or st.skip_pending or st.paused:
                 return
-            remaining = end - time.time()
+            remaining = deadline - time.time()
             if remaining <= 0:
                 return
-            time.sleep(min(0.05, remaining))
+            time.sleep(min(0.02, remaining))
 
     # -- frame pump ----------------------------------------------------------
     def play_scene(self, scene, state_name, now_playing=None, log=None):
@@ -127,15 +215,22 @@ class Scheduler(object):
         st = self.state
         self.scene_log.append(log or state_name)
         st.set_scene(state_name, now_playing)
+        # Absolute frame deadlines. Sleeping `hold` *after* each frame ignores
+        # the time spent decoding/compositing the next one, so every frame ran
+        # long by a varying amount — animations played slow and stuttered.
+        deadline = self._now()
         try:
             for img, hold in scene:
                 if st.stop_requested:
                     break
                 if st.take_skip():
                     break
+                if state_name == "animation" and self.web_active():
+                    break   # someone opened the web UI: yield the core
                 if st.paused:
                     if not self._pause_gate(state_name):
                         break
+                    deadline = self._now()   # resync after a pause
                 self._apply_brightness()
                 self.driver.show(img)
                 self.frames_shown += 1
@@ -145,7 +240,17 @@ class Scheduler(object):
                         and self.frames_shown >= self.max_frames:
                     st.request_stop()
                     break
-                self._sleep_ms(hold)
+                deadline += max(MIN_FRAME_S, hold / 1000.0)
+                if self.fast:
+                    self._advance_ms(hold)
+                    continue
+                now = time.time()
+                if deadline < now - MAX_LAG_S:
+                    # Too far behind (a big GIF, a config reload): resync
+                    # instead of sprinting through frames to catch up.
+                    deadline = now
+                else:
+                    self._sleep_until(deadline)
         except Exception:
             sys.stderr.write("scene %r failed:\n" % (state_name,))
             traceback.print_exc()
@@ -218,6 +323,82 @@ class Scheduler(object):
         self._apply_brightness()
         st.tick()
 
+    # -- web-UI back-off ---------------------------------------------------
+    def web_active(self):
+        """Is someone using the web UI right now? (mtime of a tmpfs file the
+        web app touches per request — cheap enough to poll per frame.)"""
+        if self.fast:
+            return False
+        now = time.time()
+        if now - self._ui_checked_at < 0.5:      # cache: 2 stats/second max
+            return self._ui_active
+        self._ui_checked_at = now
+        mode = self.cfg.get("web.on_activity", "clock_only")
+        if mode == "none":
+            self._ui_active = False
+            return False
+        try:
+            age = now - os.path.getmtime(paths.ui_active_path())
+        except OSError:
+            self._ui_active = False
+            return False
+        try:
+            window = float(self.cfg.get("web.activity_timeout_s", 20))
+        except (TypeError, ValueError):
+            window = 20.0
+        self._ui_active = age < window
+        return self._ui_active
+
+    def _set_nice(self, value):
+        """Renice this process's normal threads. The panel's refresh thread
+        runs at realtime priority, so it is unaffected and the display keeps
+        its timing — only frame *preparation* yields to the web server."""
+        if self._nice_now == value or self.fast:
+            return
+        try:
+            os.setpriority(os.PRIO_PROCESS, 0, value)
+            self._nice_now = value
+        except (OSError, AttributeError, PermissionError):
+            self._nice_now = value    # not permitted: stop retrying
+
+    def _web_gate(self):
+        """While the web UI is in use, stop animating and give the core to
+        the web server. -> True if we handled the panel here."""
+        if not self.web_active():
+            self._set_nice(NICE_NORMAL)
+            return False
+        mode = self.cfg.get("web.on_activity", "clock_only")
+        st = self.state
+        self._set_nice(NICE_WEB_ACTIVE)
+        self.scene_log.append("web_ui")
+        st.set_scene("web_ui", {"type": "clock", "game": "", "name": "web_ui",
+                                "started_at": time.time(), "duration_ms": 0})
+        blank = Image.new("RGB", self.canvas)
+        while not st.stop_requested and self.web_active():
+            if st.paused:
+                if not self._pause_gate("web_ui"):
+                    break
+            try:
+                if mode == "pause":
+                    self.driver.show(blank)
+                else:
+                    # A single clock frame per second: negligible CPU, and
+                    # the thing on the wall is still a clock.
+                    self._apply_brightness()
+                    self.driver.show(scenes.clock_still(self.cfg, self.canvas))
+            except Exception:
+                traceback.print_exc()
+            self.frames_shown += 1
+            self._maybe_snapshot()
+            st.tick()
+            if self.max_frames is not None \
+                    and self.frames_shown >= self.max_frames:
+                st.request_stop()
+                break
+            self._sleep_ms(1000)
+        self._set_nice(NICE_NORMAL)
+        return True
+
     def _sleep_gate(self):
         """Handle the sleep window / manual sleep. -> True if it slept."""
         st = self.state
@@ -289,7 +470,7 @@ class Scheduler(object):
         self.play_scene(scenes.name_scene(self.cfg, title, self.canvas),
                         "animation", log="name")
 
-    def _play_dmd(self, game, name, path):
+    def _play_dmd(self, game, name, path, preloaded=None):
         cfg = self.cfg
         show = cfg.get("playback.show_name", "hide")
         title = name.replace("_", " ")
@@ -301,12 +482,16 @@ class Scheduler(object):
         duration = found[0].get("duration_ms", 0) if found else 0
         np = {"type": "dmd", "game": game, "name": name,
               "started_at": time.time(), "duration_ms": duration}
-        self.play_scene(scenes.dmd_scene(cfg, path, canvas=self.canvas),
+        header, frames, indexes = (preloaded if preloaded
+                                   else (None, None, None))
+        self.play_scene(scenes.dmd_scene(cfg, path, header=header,
+                                         frames=frames, indexes=indexes,
+                                         canvas=self.canvas),
                         "animation", np, log=("dmd", game, name))
         if show == "after" and not self.state.stop_requested:
             self._play_name_card(title)
 
-    def _play_gif(self, category, filename, path):
+    def _play_gif(self, category, filename, path, preloaded=None):
         cfg = self.cfg
         show = cfg.get("playback.show_name", "hide")
         title = os.path.splitext(filename)[0].replace("_", " ")
@@ -316,7 +501,8 @@ class Scheduler(object):
             return
         np = {"type": "gif", "game": category, "name": filename,
               "started_at": time.time(), "duration_ms": 0}
-        self.play_scene(scenes.gif_scene(cfg, path, canvas=self.canvas),
+        self.play_scene(scenes.gif_scene(cfg, path, canvas=self.canvas,
+                                         frames=preloaded),
                         "animation", np, log=("gif", category, filename))
         if show == "after" and not self.state.stop_requested:
             self._play_name_card(title)
@@ -344,7 +530,8 @@ class Scheduler(object):
             else:
                 dwell = _safe_int(cfg.get("clock.idle_dwell_ms", 6000), 6000)
             sc = scenes.clock_scene(cfg, self.canvas, dwell,
-                                    self._backgrounds, rng=self.rng)
+                                    self._backgrounds, rng=self.rng,
+                                    time_fn=self._now)
             sc = transitions.wrap(sc, cfg.get("clock.transition", "random"),
                                   self.rng)
             np = {"type": "clock", "game": "", "name": "clock",
@@ -451,6 +638,8 @@ class Scheduler(object):
         self._boundary()
         if self._sleep_gate():
             return
+        if self._web_gate():
+            return
         if st.stop_requested:
             return
         if st.take_test():
@@ -475,6 +664,16 @@ class Scheduler(object):
             return
 
         gap = self.cfg.animation_gap_seconds(self.rng)
+
+        # Choose the next animation BEFORE the clock plays and load it in the
+        # background, so clock -> animation is seamless. Reading an .rda or
+        # decoding a multi-MB GIF off the SD card otherwise leaves the panel
+        # black for seconds after the clock fades out.
+        picked = None
+        if gap is not None:
+            picked = self._pick_animation()
+            self.prefetch.start(picked)
+
         self._play_clock_cycle(gap)
         if st.stop_requested:
             return
@@ -489,11 +688,11 @@ class Scheduler(object):
             st.take_skip()
             self._play_queued(queued)
             return
-        picked = self._pick_animation()
         if picked is None:
             return
         kind, item = picked
+        preloaded = self.prefetch.take(picked)
         if kind == "dmd":
-            self._play_dmd(*item)
+            self._play_dmd(item[0], item[1], item[2], preloaded=preloaded)
         else:
-            self._play_gif(*item)
+            self._play_gif(item[0], item[1], item[2], preloaded=preloaded)

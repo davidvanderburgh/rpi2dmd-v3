@@ -179,6 +179,14 @@
         return;
       }
       var np = st.now_playing || {};
+      if (state === "web_ui") {
+        title.textContent = "Animations paused while you're in here";
+        sub.textContent = "This Pi has one CPU core, so the panel steps " +
+          "aside to keep the interface quick. It shows the clock, and " +
+          "animations resume a few seconds after you stop clicking.";
+        elapsed.textContent = "";
+        return;
+      }
       if (np.type === "dmd" || np.type === "gif") {
         title.textContent = (np.game ? np.game + " / " : "") + (np.name || "");
         sub.textContent = np.type === "dmd" ? "DMD animation" : "GIF clip";
@@ -256,18 +264,39 @@
       $("#ck-font-size-val").textContent = $("#ck-font-size").value;
     }
 
+    // The preview is only a proposal until it is saved; say so loudly, so
+    // "the browser shows X but the panel shows Y" can't happen silently.
+    function markDirty() {
+      var save = $("#clock-save");
+      if (save) {
+        save.classList.add("dirty");
+        save.textContent = "Save — not yet on the panel";
+      }
+    }
+    function markClean() {
+      var save = $("#clock-save");
+      if (save) {
+        save.classList.remove("dirty");
+        save.textContent = "Save";
+      }
+    }
+
     $$("[data-clock]").forEach(function (el) {
       var evt = (el.tagName === "SELECT" || el.type === "checkbox" ||
                  el.type === "color") ? "change" : "input";
       el.addEventListener(evt, function () {
         updateVisibility();
         refreshPreview();
+        markDirty();
       });
       if (evt === "input") {
         el.addEventListener("change", refreshPreview);
       }
     });
-    $("#ck-tint").addEventListener("change", refreshPreview);
+    $("#ck-tint").addEventListener("change", function () {
+      refreshPreview();
+      markDirty();
+    });
 
     // Keep the preview current (clock ticks), but slowly: each render costs
     // the Pi real CPU, and polling this every second starved the rest of the
@@ -308,7 +337,8 @@
       }
     }).catch(function () {});
 
-    // presets (client-side control fill; user still saves)
+    // Presets apply straight to the panel. A preset that only changed the
+    // preview looked applied but wasn't — the panel kept the old font.
     $$(".preset").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var p = JSON.parse(btn.getAttribute("data-preset"));
@@ -330,7 +360,8 @@
         });
         updateVisibility();
         refreshPreview();
-        toast("Preset applied — press Save to keep it");
+        saveConfig(collectForSave(), "Preset applied to the panel");
+        markClean();
       });
     });
 
@@ -352,7 +383,8 @@
     }
 
     $("#clock-save").addEventListener("click", function () {
-      saveConfig(collectForSave(), "Clock saved");
+      saveConfig(collectForSave(), "Clock saved — live on the panel");
+      markClean();
     });
 
     $("#clock-reset").addEventListener("click", function () {
@@ -374,6 +406,7 @@
         });
         updateVisibility();
         refreshPreview();
+        markClean();
         toast("Reverted to saved settings");
       });
     });

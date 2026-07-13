@@ -16,6 +16,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 
 from PIL import Image, ImageDraw, ImageFont, ImageSequence
 
@@ -312,11 +313,17 @@ def _render_text_layer(text, font, color, mode):
 # clock scene
 # ---------------------------------------------------------------------------
 
-def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None):
+def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None,
+                time_fn=None):
     """Standalone clock for dwell_ms. Animated GIF backgrounds advance per
     their frame durations while the clock keeps re-rendering (hold capped
-    at ~100ms so the blinking colon stays live)."""
+    at ~100ms so the blinking colon stays live).
+
+    time_fn: the scheduler's clock (simulated under --fast), so blink
+    alignment stays deterministic in tests.
+    """
     rng = rng or random
+    time_fn = time_fn or time.time
     w, h = canvas
     ck = cfg["clock"]
     dwell = int(dwell_ms if dwell_ms is not None
@@ -332,6 +339,9 @@ def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None):
         except (OSError, ValueError, Image.DecompressionBombError):
             bg_frames = None
 
+    blinking = ck.get("colon", "blink") == "blink" or "%S" in str(
+        ck.get("format", ""))
+
     elapsed = 0
     idx = 0
     remaining = bg_frames[0][1] if bg_frames else 0
@@ -342,6 +352,11 @@ def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None):
         else:
             bg = None
             hold = CLOCK_TICK_MS
+        if blinking:
+            # Land a frame exactly on the next second so the colon flips on
+            # the beat instead of up to a tick late.
+            to_second = int((1.0 - (time_fn() % 1.0)) * 1000) + 1
+            hold = min(hold, to_second)
         hold = max(MIN_FRAME_MS, min(hold, dwell - elapsed))
         frame = clock.render_scene(ck, w, h, background=bg, tint=tint,
                                    gamma=gamma, fonts_dir=fonts_dir)
@@ -352,6 +367,15 @@ def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None):
             if remaining <= 0:
                 idx = (idx + 1) % len(bg_frames)
                 remaining = bg_frames[idx][1]
+
+
+def clock_still(cfg, canvas=CANVAS):
+    """One clock frame, no background. Used while the web UI is in use: the
+    panel still shows the time, at a cost of one render per second."""
+    w, h = canvas
+    tint, gamma = _display(cfg)
+    return clock.render_scene(cfg["clock"], w, h, tint=tint, gamma=gamma,
+                              fonts_dir=paths.fonts_dir())
 
 
 # ---------------------------------------------------------------------------
@@ -404,9 +428,14 @@ def _name_overlay(text, w, h):
     return layer
 
 
-def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS):
+def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS,
+              indexes=None):
     """Play an RDA animation honoring per-frame durations and the clock
-    overlay rules (playback.clock_overlay / per-animation metadata)."""
+    overlay rules (playback.clock_overlay / per-animation metadata).
+
+    indexes: optional pre-unpacked frames (the prefetcher supplies these so
+    the render loop does not pay for nibble expansion per frame).
+    """
     if header is None or frames is None:
         header, frames = rda.read_rda(rda_path)
     w, h = canvas
@@ -422,7 +451,7 @@ def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS):
 
     durations = header.get("durations", [])
     for i, packed in enumerate(frames):
-        idx = rda.unpack_frame(packed)
+        idx = indexes[i] if indexes is not None else rda.unpack_frame(packed)
         if mode is not None and start <= i <= end:
             grid, _ = clock.render_indexed(
                 cfg["clock"], rda.WIDTH, rda.HEIGHT,
@@ -444,11 +473,18 @@ def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS):
 # GIF scene
 # ---------------------------------------------------------------------------
 
-def gif_scene(cfg, path, canvas=CANVAS):
+def load_gif_frames(path, canvas=CANVAS):
+    """Decode a GIF to canvas-sized frames. Slow on a Pi (big GIFs take
+    seconds), so the scheduler prefetches this off the critical path."""
+    return _load_image_frames(path, target=canvas)
+
+
+def gif_scene(cfg, path, canvas=CANVAS, frames=None):
     """Play a GIF file: per-frame durations, cover-scale to the canvas,
     single pass (looped until >= 1.5s total), optional clock overlay."""
     w, h = canvas
-    frames = _load_image_frames(path, target=(w, h))
+    if frames is None:
+        frames = _load_image_frames(path, target=(w, h))
     total = sum(dur for _, dur in frames)
     passes = 1
     if total > 0:

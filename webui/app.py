@@ -504,10 +504,29 @@ def _apply_clamps(doc):
 # Auth + shared template context
 # ---------------------------------------------------------------------------
 
+# The dashboard polls /api/status on a timer; that is the page breathing,
+# not a human doing something. Counting it would pause the panel forever
+# just because a tab is open somewhere.
+_NOT_ACTIVITY = ("/api/status",)
+
+
+def _mark_ui_active():
+    """Tell the player a human is using the UI, so it backs off and gives
+    the core to this request (single-core Pi). Just an mtime bump."""
+    try:
+        p = paths.ui_active_path()
+        with open(p, "a"):
+            os.utime(p, None)
+    except OSError:
+        pass
+
+
 @app.before_request
 def _gate():
     if request.path.startswith("/static/"):
         return None
+    if request.path not in _NOT_ACTIVITY:
+        _mark_ui_active()
     _refresh_config()
     if not CFG.get("web.auth_enabled", False):
         return None

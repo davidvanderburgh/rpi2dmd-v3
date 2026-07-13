@@ -8,10 +8,10 @@ WorkingDirectory=/opt/rpi2dmd-v3/webui
 Environment=PYTHONPATH=/opt/rpi2dmd-v3/player
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 /opt/rpi2dmd-v3/webui/app.py
-# The matrix refresh thread runs at realtime priority and saturates the
-# single core on a Pi Zero; without this the web UI is starved and pages
-# take many seconds.
-Nice=-5
+# Yield to the player: smooth animations matter more than fast page loads.
+# The render loop is asleep most of each frame period, so the web UI gets
+# that time; it just never preempts a frame that is due.
+Nice=5
 Restart=always
 RestartSec=3
 

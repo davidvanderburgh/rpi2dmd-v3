@@ -408,8 +408,12 @@ def test_clock_preview():
                      save_as="clock_default.png")
     if img is not None:
         r, g, b = [band.getextrema() for band in img.split()]
-        check("default preview amber-ish (R>G>B=0)",
-              r[1] > 200 and 100 < g[1] < 200 and b[1] == 0, (r, g, b))
+        # Authentic Williams/Bally plasma amber is (255, 88, 32): strongly
+        # red-dominant with a little green and a trace of blue.
+        expect = rda.TINTS["amber"]
+        check("default preview renders the plasma amber tint",
+              r[1] == expect[0] and g[1] == expect[1] and b[1] == expect[2]
+              and r[1] > g[1] > b[1], (r, g, b, expect))
 
     _check_png("rundmd colon-on",
                "/api/preview/clock.png?style=rundmd&format=12h_ampm"

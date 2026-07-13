@@ -147,6 +147,15 @@ DEFAULTS = {
         "auth_enabled": False,
         "username": "admin",
         "password": "",
+        # What the panel does while you are actively using the web UI. On a
+        # single-core Pi the render loop and the web server fight for the
+        # one core; backing off here makes the UI responsive and stops
+        # animations from stuttering mid-render.
+        #   clock_only - keep showing the clock, pause animations (default)
+        #   pause      - blank the panel entirely
+        #   none       - carry on regardless (needs a faster Pi)
+        "on_activity": "clock_only",
+        "activity_timeout_s": 20,
     },
     "system": {
         "show_ip_on_change": True,
