@@ -12,6 +12,7 @@ import os
 import random
 import signal
 import sys
+import time
 
 from . import config, control, library, matrix, netsetup, paths, \
     scenes, scheduler, transitions, weather
@@ -75,9 +76,45 @@ def build_once_scene(name, cfg, sched, lib, rng):
     return None
 
 
+SAFE_PANEL = {"pwm_bits": 7, "limit_refresh_hz": 120, "pwm_dither_bits": 0,
+              "pwm_lsb_nanoseconds": 0, "gpio_slowdown": 2}
+CRASH_WINDOW_S = 90
+CRASH_LIMIT = 3
+
+
+def _crash_loop_guard(cfg):
+    """If we keep dying seconds after start, the panel settings are the most
+    likely culprit (they drive a realtime thread that can starve the box).
+    Fall back to values known to run, rather than restarting forever."""
+    marker = os.path.join(paths.run_dir(), "starts")
+    now = time.time()
+    starts = []
+    try:
+        with open(marker, "r") as f:
+            starts = [float(x) for x in f.read().split() if x.strip()]
+    except (OSError, ValueError):
+        starts = []
+    starts = [t for t in starts if now - t < CRASH_WINDOW_S]
+    starts.append(now)
+    try:
+        with open(marker, "w") as f:
+            f.write(" ".join("%.0f" % t for t in starts))
+    except OSError:
+        pass
+    if len(starts) >= CRASH_LIMIT:
+        sys.stderr.write(
+            "rpi2dmd: %d starts in %ds - falling back to safe panel "
+            "settings (%s)\n" % (len(starts), CRASH_WINDOW_S, SAFE_PANEL))
+        for k, v in SAFE_PANEL.items():
+            cfg.data["panel"][k] = v
+    return cfg
+
+
 def main(argv=None):
     args = parse_args(argv)
     cfg = config.Config(args.config)
+    if not args.sim:
+        _crash_loop_guard(cfg)
     try:
         netsetup.apply(cfg)
     except Exception as e:

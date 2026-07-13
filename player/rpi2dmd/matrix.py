@@ -47,17 +47,45 @@ class RgbMatrixDriver(BaseDriver):
         from rgbmatrix import RGBMatrix, RGBMatrixOptions
 
         panel = cfg["panel"]
+
+        def clamped(key, default, low, high):
+            """Panel values reach the matrix library's realtime thread, which
+            runs SCHED_FIFO at priority 99 on a single core. A silly value
+            there can starve the whole system to the point where even sshd
+            cannot answer, so nothing hostile gets through."""
+            try:
+                v = int(panel.get(key, default))
+            except (TypeError, ValueError):
+                return default
+            return max(low, min(high, v))
+
         opts = RGBMatrixOptions()
-        opts.cols = int(panel["cols"])
-        opts.rows = int(panel["rows"])
-        opts.chain_length = int(panel["chain"])
-        opts.parallel = int(panel["parallel"])
-        opts.gpio_slowdown = int(panel["gpio_slowdown"])
+        opts.cols = clamped("cols", 64, 8, 256)
+        opts.rows = clamped("rows", 32, 8, 128)
+        opts.chain_length = clamped("chain", 2, 1, 12)
+        opts.parallel = clamped("parallel", 1, 1, 3)
+        opts.gpio_slowdown = clamped("gpio_slowdown", 2, 0, 5)
         opts.led_rgb_sequence = str(panel.get("rgb_order", "RGB"))
-        opts.pwm_bits = int(panel.get("pwm_bits", 11))
-        limit = int(panel.get("limit_refresh_hz", 0) or 0)
+        pwm_bits = clamped("pwm_bits", 7, 1, 11)
+        opts.pwm_bits = pwm_bits
+        limit = clamped("limit_refresh_hz", 120, 0, 400)
         if limit:
             opts.limit_refresh_rate_hz = limit
+        # Dithering skips the least-significant PWM planes. It is NOT a CPU
+        # win on a Pi Zero (measured: refresh thread went 75% -> 88%), so it
+        # defaults off; it must also stay below pwm_bits to be meaningful.
+        dither = clamped("pwm_dither_bits", 0, 0, 2)
+        if dither and dither < pwm_bits:
+            try:
+                opts.pwm_dither_bits = dither
+            except AttributeError:
+                pass
+        lsb_ns = clamped("pwm_lsb_nanoseconds", 0, 0, 3000)
+        if lsb_ns:
+            try:
+                opts.pwm_lsb_nanoseconds = lsb_ns
+            except AttributeError:
+                pass
         opts.drop_privileges = False
         self._matrix = RGBMatrix(options=opts)
         self._canvas = self._matrix.CreateFrameCanvas()

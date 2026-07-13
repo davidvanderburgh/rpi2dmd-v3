@@ -40,6 +40,8 @@ DEFAULTS = {
         # the thread's CPU dramatically. Raise both on a Pi 3/4.
         "pwm_bits": 7,
         "limit_refresh_hz": 120,
+        "pwm_dither_bits": 0,      # 1-2 frees CPU at a little color precision
+        "pwm_lsb_nanoseconds": 0,  # 0 = library default
     },
     "display": {
         # per-hour brightness, index = hour 0..23, percent 0..100.
