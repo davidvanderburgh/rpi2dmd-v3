@@ -31,7 +31,17 @@ class BaseDriver(object):
 
 
 class RgbMatrixDriver(BaseDriver):
-    """hzeller rpi-rgb-led-matrix Python bindings, double buffered."""
+    """hzeller rpi-rgb-led-matrix Python bindings, double buffered.
+
+    32-bit ARM hazard: the binding's fast path reads Pillow's internal buffer
+    pointer and casts it to size_t. Pillow images allocated on a *worker*
+    thread come from a glibc arena mmap'd high in the address space, so that
+    pointer is negative as a signed 32-bit int and SetImage raises
+    "OverflowError: can't convert negative value to size_t" — every frame of
+    every animation decoded off-thread (our prefetcher) failed this way.
+    We therefore blit each frame into one scratch image allocated on the
+    thread that owns the matrix, and hand the binding only that.
+    """
 
     def __init__(self, cfg):
         from rgbmatrix import RGBMatrix, RGBMatrixOptions
@@ -53,22 +63,42 @@ class RgbMatrixDriver(BaseDriver):
         self._canvas = self._matrix.CreateFrameCanvas()
         self.width = opts.cols * opts.chain_length
         self.height = opts.rows * opts.parallel
+        self._safe_path = False
+        self._scratch = self._make_scratch()
+
+    def _make_scratch(self):
+        """An RGB buffer this thread owns that the binding accepts. Rejected
+        candidates are kept alive so the allocator hands out a new address."""
+        from PIL import Image
+
+        rejected = []
+        for _ in range(64):
+            img = Image.new("RGB", (self.width, self.height))
+            try:
+                self._canvas.SetImage(img)
+                return img
+            except OverflowError:
+                rejected.append(img)
+        # Never found a usable address: fall back to the binding's safe (but
+        # slow) per-pixel path rather than showing nothing.
+        self._safe_path = True
+        sys.stderr.write("matrix: no low-address buffer available; using the "
+                         "slow SetImage path\n")
+        return Image.new("RGB", (self.width, self.height))
 
     def show(self, image):
         if image.mode != "RGB":
             image = image.convert("RGB")
         if image.size != (self.width, self.height):
-            # The bindings index straight into the buffer; a wrong-sized
-            # frame makes them compute a negative length and raise
-            # OverflowError, which would kill the whole scene.
             image = image.resize((self.width, self.height))
+        self._scratch.paste(image, (0, 0))   # in place: address never moves
         try:
-            self._canvas.SetImage(image)
+            if self._safe_path:
+                self._canvas.SetImage(self._scratch, 0, 0, False)
+            else:
+                self._canvas.SetImage(self._scratch)
         except (OverflowError, ValueError) as e:
-            # One bad frame must not abort the animation.
-            sys.stderr.write(
-                "matrix: dropped frame (%s) size=%r mode=%r\n"
-                % (e, image.size, image.mode))
+            sys.stderr.write("matrix: dropped frame (%s)\n" % e)
             return
         self._canvas = self._matrix.SwapOnVSync(self._canvas)
 

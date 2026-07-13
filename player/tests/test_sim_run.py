@@ -337,6 +337,60 @@ def test_scheduler_sequence():
     ok("scheduler sequence (freq 1s, seeded)")
 
 
+def test_worker_thread_frames():
+    """Frames produced on a worker thread must reach the driver.
+
+    On 32-bit ARM the rgbmatrix binding casts Pillow's buffer pointer to
+    size_t; a Pillow image allocated on a worker thread comes from a
+    high-mapped glibc arena, so that pointer is negative and SetImage raises
+    OverflowError. Our prefetcher decodes GIFs off-thread, so this used to
+    drop every frame of every prefetched clip. The driver now blits into a
+    scratch buffer it owns. This test proves worker-thread frames survive
+    the whole path (the real bindings aren't here, so it checks the contract
+    the driver relies on, plus the prefetch->scene handoff).
+    """
+    import threading
+
+    from PIL import Image
+
+    cfg = config.Config()
+    cfg.data = config.deep_merge(config.DEFAULTS, {})
+    driver = matrix.SimDriver(cfg.data, out_dir=os.path.join(TEST_RUN, "wt"))
+
+    # a frame built on a worker thread, exactly like the prefetcher does
+    box = {}
+
+    def worker():
+        box["img"] = Image.new("RGB", (driver.width, driver.height),
+                               (200, 40, 10))
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    driver.show(box["img"])
+    assert driver.last_image is not None
+    assert driver.last_image.size == (driver.width, driver.height)
+    assert driver.last_image.getextrema()[0][1] == 200, "pixels lost"
+
+    # prefetched GIF frames (decoded on a thread) play through a scene
+    lib = library.Library()
+    pick = lib.pick_gif(random.Random(7), cfg)
+    assert pick is not None, "no gif to test with"
+    pf = scheduler.Prefetcher((driver.width, driver.height))
+    key = ("gif", pick)
+    pf.start(key)
+    frames = pf.take(key)
+    assert frames, "prefetch returned no frames"
+    shown = 0
+    for img, _hold in scenes.gif_scene(cfg, pick[2],
+                                       canvas=(driver.width, driver.height),
+                                       frames=frames):
+        driver.show(img)
+        shown += 1
+    assert shown > 0, "prefetched gif produced no frames"
+    ok("worker-thread frames reach the driver (32-bit pointer bug)")
+
+
 def main():
     tests = [
         test_config_load_merge,
@@ -347,6 +401,7 @@ def main():
         test_transitions,
         test_control_roundtrip,
         test_scheduler_sequence,
+        test_worker_thread_frames,
     ]
     for t in tests:
         t()
