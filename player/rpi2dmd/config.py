@@ -33,17 +33,21 @@ DEFAULTS = {
         "parallel": 1,
         "gpio_slowdown": 2,
         "rgb_order": "RGB",
-        "pwm_bits": 11,
-        "limit_refresh_hz": 0,
+        # Tuned for the single-core Pi Zero W these units usually run on:
+        # the matrix library's realtime refresh thread will otherwise eat
+        # the whole core and starve the web UI (pages took 15 s). 7 bits is
+        # ample for 16-shade DMD content, and capping the refresh rate cuts
+        # the thread's CPU dramatically. Raise both on a Pi 3/4.
+        "pwm_bits": 7,
+        "limit_refresh_hz": 120,
     },
     "display": {
-        # per-hour brightness, index = hour 0..23, percent 0..100
-        "brightness_by_hour": [
-            5, 5, 5, 5, 5, 5, 10, 20, 30, 40, 50, 60,
-            60, 60, 60, 60, 60, 60, 50, 40, 30, 20, 10, 5,
-        ],
+        # per-hour brightness, index = hour 0..23, percent 0..100.
+        # Full brightness by default — this is a display appliance; use the
+        # Schedule page (or the sleep window) to dim it at night.
+        "brightness_by_hour": [100] * 24,
         "tint": "amber",          # rpi2dmd.rda.TINTS key or [r,g,b]
-        "gamma": 1.6,
+        "gamma": 1.0,             # linear; see rda.DEFAULT_GAMMA
     },
     "clock": {
         "enabled": True,           # v3 requirement: clock on by default
@@ -94,6 +98,13 @@ DEFAULTS = {
     },
     "dmd": {
         "games": {},                # game -> enabled (missing = enabled)
+        # How DMD animations are colored:
+        #   per_game - use the real machine's display color (Williams/Bally
+        #              90s plasma = amber, Stern LED era = red); falls back
+        #              to display.tint for games not in the table
+        #   global   - always use display.tint
+        "tint_mode": "per_game",
+        "game_tints": {},           # game -> tint name; see GAME_TINTS
         "disabled_animations": [    # factory-disabled in the B237 image
             "STAR_TREK_031", "STAR_TREK_032",
             "STAR_TREK_033", "STAR_TREK_034",
@@ -306,8 +317,9 @@ def migrate_v2(path):
         p["gpio_slowdown"] = geti("GPIO_Slowdown")
     if kv.get("RGB_Order"):
         p["rgb_order"] = kv["RGB_Order"]
-    if geti("PWM_Bits") is not None:
-        p["pwm_bits"] = geti("PWM_Bits")
+    # PWM_Bits is deliberately NOT migrated: v2's 11 is too expensive for the
+    # Python stack on a single-core Pi (it starves the web UI). The v3 default
+    # is tuned instead; change it on the Playback page if your Pi can afford it.
 
     bright = []
     for h in range(24):

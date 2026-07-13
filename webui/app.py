@@ -198,9 +198,40 @@ def _load_index():
     return _index_cache["data"] or {}
 
 
-def _gif_scan():
-    """-> sorted list of (category, [gif filenames])."""
+# Walking 10k+ GIFs off a slow SD card took ~9 s per request on a Pi Zero
+# and was redone on every page load. Cache it; the library changes rarely
+# (SMB drops), so a TTL plus a directory-mtime check is plenty.
+_gif_scan_cache = {"at": 0.0, "sig": None, "cats": None}
+_GIF_SCAN_TTL_S = 120
+
+
+def _gif_dir_signature(root):
+    """Cheap staleness check: (mtime, size) of the gif root + each category."""
+    sig = []
+    try:
+        sig.append(os.path.getmtime(root))
+        for name in sorted(os.listdir(root)):
+            d = os.path.join(root, name)
+            if os.path.isdir(d):
+                sig.append((name, os.path.getmtime(d)))
+    except OSError:
+        return None
+    return tuple(sig)
+
+
+def _gif_scan(force=False):
+    """-> sorted list of (category, [gif filenames]). Cached."""
     root = paths.gif_dir()
+    now = time.time()
+    cached = _gif_scan_cache["cats"]
+    if not force and cached is not None:
+        if now - _gif_scan_cache["at"] < _GIF_SCAN_TTL_S:
+            return cached
+        if _gif_dir_signature(root) == _gif_scan_cache["sig"]:
+            _gif_scan_cache["at"] = now   # unchanged: extend the TTL
+            return cached
+
+    sig = _gif_dir_signature(root)
     cats = []
     try:
         names = sorted(os.listdir(root))
@@ -216,6 +247,7 @@ def _gif_scan():
         except OSError:
             files = []
         cats.append((name, files))
+    _gif_scan_cache.update({"at": now, "sig": sig, "cats": cats})
     return cats
 
 

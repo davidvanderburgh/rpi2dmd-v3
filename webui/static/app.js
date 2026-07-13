@@ -269,10 +269,13 @@
     });
     $("#ck-tint").addEventListener("change", refreshPreview);
 
-    // live colon blink: re-fetch once a second while visible
+    // Keep the preview current (clock ticks), but slowly: each render costs
+    // the Pi real CPU, and polling this every second starved the rest of the
+    // web UI. Edits still refresh the preview instantly via the input
+    // handlers above.
     setInterval(function () {
       if (!document.hidden) refreshPreview();
-    }, 1000);
+    }, 5000);
 
     // alignment 3x3 grid
     $$(".align-btn").forEach(function (btn) {

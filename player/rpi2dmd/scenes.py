@@ -50,9 +50,20 @@ _DEJAVU_CANDIDATES = [
 # shared helpers
 # ---------------------------------------------------------------------------
 
-def _display(cfg):
-    """-> (tint, gamma) from the display config."""
+def _display(cfg, game=None):
+    """-> (tint, gamma) from the display config.
+
+    When a game is given and dmd.tint_mode is "per_game", the machine's real
+    display color wins (Williams/Bally 90s plasma = amber, Stern LED = red),
+    falling back to display.tint for games with no mapping.
+    """
     tint = cfg.get("display.tint", rda.DEFAULT_TINT)
+    if game and cfg.get("dmd.tint_mode", "per_game") == "per_game":
+        mapped = (cfg.get("dmd.game_tints", {}) or {}).get(game)
+        if mapped is None:
+            mapped = rda.GAME_TINTS.get(game)
+        if mapped:
+            tint = mapped
     if isinstance(tint, list):
         tint = tuple(tint)
     try:
@@ -399,7 +410,7 @@ def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS):
     if header is None or frames is None:
         header, frames = rda.read_rda(rda_path)
     w, h = canvas
-    tint, gamma = _display(cfg)
+    tint, gamma = _display(cfg, game=header.get("game"))
     palette = rda.build_palette(tint, gamma)
     mode, size_hint, override_xy, start, end = _resolve_overlay(cfg, header)
     outline = bool(cfg.get("clock.outline", True))
@@ -662,6 +673,24 @@ def ip_scene(cfg, canvas=CANVAS):
         d.text(((w - tw) // 2 - ox, y - oy), ln, font=font, fill=color)
         y += th + 1
     yield img, 5000
+
+
+def no_network_scene(cfg, canvas=CANVAS):
+    """Shown at startup when the device has no IP: without this the panel
+    looks perfectly healthy while the web UI is silently unreachable."""
+    w, h = canvas
+    lines = ["NO NETWORK", "set Wifi_ssid + Wifi_psk", "in config/config.txt"]
+    color = _bright_color(cfg)
+    font = _load_ttf(None, 8)
+    img = Image.new("RGB", (w, h))
+    d = ImageDraw.Draw(img)
+    heights = [_measure(d, ln, font) for ln in lines]
+    total = sum(m[1] for m in heights) + (len(lines) - 1)
+    y = max(0, (h - total) // 2)
+    for ln, (tw, th, ox, oy) in zip(lines, heights):
+        d.text(((w - tw) // 2 - ox, y - oy), ln, font=font, fill=color)
+        y += th + 1
+    yield img, 6000
 
 
 def test_scene(cfg, canvas=CANVAS):

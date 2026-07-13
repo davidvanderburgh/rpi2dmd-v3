@@ -397,6 +397,12 @@ class Scheduler(object):
         if not self.cfg.get("system.show_ip_on_change", True):
             return
         ips = scenes.get_ip_list()
+        if not ips:
+            # No IP at all: say so on the panel, otherwise the device looks
+            # healthy while the web UI is unreachable for no visible reason.
+            self.play_scene(scenes.no_network_scene(self.cfg, self.canvas),
+                            "clock", log="no_network")
+            return
         current = ",".join(ips)
         marker = os.path.join(paths.run_dir(), "last_ip.txt")
         previous = None

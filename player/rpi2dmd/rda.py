@@ -117,9 +117,14 @@ def pack_frame(indexes):
 # ---------------------------------------------------------------------------
 
 TINTS = {
-    "amber": (255, 140, 0),      # classic plasma DMD orange
+    # The authentic 90s Williams/Bally gas-plasma DMD orange: the VPinMAME
+    # built-in default (dmd_red=255, dmd_green=88, dmd_blue=32), which
+    # freezy/dmd-extensions independently uses as its virtual-DMD tint.
+    "amber": (255, 88, 32),
+    "amber_deep": (255, 48, 0),    # dmd-extensions --color default
+    "amber_yellow": (255, 224, 32),  # PinMAME core.c palette (very yellow)
+    "red": (255, 0, 0),            # Stern LED DMD (AC/DC 2012 onward)
     "orange_red": (255, 69, 0),
-    "red": (255, 0, 0),
     "green": (0, 255, 70),
     "blue": (64, 128, 255),
     "cyan": (0, 220, 255),
@@ -128,8 +133,41 @@ TINTS = {
     "yellow": (255, 210, 0),
 }
 
+# The real display color of each machine in the Run-DMD library.
+#
+# Every 128x32 pinball DMD was one of two technologies: orange gas-plasma
+# (Williams/Bally WPC, Data East, Sega, Capcom, and — for US machines —
+# Stern up to and including 2011) or red LED (Stern from AC/DC, 2012 on,
+# once plasma supply dried up). No machine ever shipped green/blue/etc.
+#
+# Note the common misconception: Stern did NOT switch to red in 2006. US
+# Stern SAM games through 2011 (Iron Man, Tron, Avatar, CSI, ...) were
+# plasma amber; only European RoHS units of that era had LED panels.
+GAME_TINTS = {
+    # --- Stern LED era: red ---
+    "AC#DC": "red",                    # Stern 2012 - the switchover game
+    "AVENGERS": "red",                 # Stern 2012
+    "X-MEN": "red",                    # Stern 2012
+    "METALLICA": "red",                # Stern 2013
+    "STAR_TREK": "red",                # Stern 2013
+    "MUSTANG": "red",                  # Stern 2014
+    "THE_WALKING_DEAD": "red",         # Stern 2014
+    "KISS": "red",                     # Stern 2015
+    "WRESTLEMANIA": "red",             # Stern 2015
+    "GHOSTBUSTERS": "red",             # Stern 2016
+    "SPIDERMAN_VE": "red",             # Stern Vault Edition 2016
+    "TRANSFORMERS": "red",             # Stern 2011, first with the LED panel
+    "STERN_LOGOTYPE": "red",
+}
+# Everything else in the library is plasma amber (Williams/Bally/Data East/
+# Sega/Capcom, plus the US-plasma Stern SAM games), which is the fallback.
+
 DEFAULT_TINT = "amber"
-DEFAULT_GAMMA = 1.6
+# Linear by default: rpi-rgb-led-matrix already applies its own CIE1931
+# luminance correction, so an extra gamma here double-darkens. Run-DMD
+# content is dominated by level 10 (the "lit" shade), which a 1.6 gamma
+# crushed to 52% brightness — the panel looked washed out.
+DEFAULT_GAMMA = 1.0
 
 
 def build_palette(tint=DEFAULT_TINT, gamma=DEFAULT_GAMMA):

@@ -221,6 +221,15 @@ rsync -rt --modify-window=2 --exclude 'System Volume Information' \
 rsync -aHAXx --numeric-ids "$VR/" "$NR/" || fail "rootfs rsync failed"
 umount "$VR"; umount "$VB"
 
+# The LED panel is driven over GPIO, not the GPU, and these units are
+# usually a 512MB Pi Zero — v2's gpu_mem=256 left only 242MB for the OS.
+if grep -q '^gpu_mem=' "$NB/config.txt"; then
+    sed -i 's/^gpu_mem=.*/gpu_mem=64/' "$NB/config.txt"
+else
+    echo "gpu_mem=64" >> "$NB/config.txt"
+fi
+log "boot: gpu_mem set to 64 (headless; frees RAM for the OS)"
+
 FREE_MB=$(df -m --output=avail "$NR" | tail -n 1 | tr -d ' ')
 [ "$FREE_MB" -ge 400 ] || fail "only ${FREE_MB}MB free on new rootfs; need >=400MB for the package install"
 log "rootfs copied (${FREE_MB}MB free)"
