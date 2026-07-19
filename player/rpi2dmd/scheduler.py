@@ -24,90 +24,119 @@ from PIL import Image
 from . import paths, rda, scenes, transitions
 
 
-class Prefetcher(object):
-    """Loads the next animation in the background while the clock is up.
+PREFETCH_DEPTH = 3          # decoded animations kept ahead of playback
+PREFETCH_PACE_EVERY = 8     # frames decoded between voluntary sleeps
+PREFETCH_PACE_S = 0.012     # the sleep: caps GIL bursts so the clock's
+                            # render thread never waits behind a decode
 
-    Reading an .rda (or decoding a 1.8MB GIF) off the SD card takes long
-    enough on a Pi Zero to leave the panel black between scenes. Doing it
-    during the clock scene removes that dead space entirely.
+
+class Prefetcher(object):
+    """Decodes the next few animations ahead of playback.
+
+    Two problems this solves on a single-core Pi:
+    - Reading/decoding a multi-MB GIF takes seconds, so decoding must happen
+      well before the animation is due (a queue, not just the next item —
+      one huge GIF followed by small ones is absorbed by the lookahead).
+    - The decoder shares the interpreter with the render loop. OS priorities
+      do not arbitrate the GIL, so an unthrottled decode makes the clock's
+      frame thread wait mid-draw — that is jitter. Decoding is therefore
+      paced with voluntary sleeps; each animation takes a little longer to
+      load, but the queue hides that and the clock stays on the beat.
+
+    Failed decodes are recorded (payload None) so callers never wait on
+    something that will never arrive.
     """
 
-    def __init__(self, canvas):
+    def __init__(self, canvas, depth=PREFETCH_DEPTH):
         self.canvas = canvas
+        self.depth = depth
         self._lock = threading.Lock()
-        self._pick = None       # ("dmd"|"gif", item tuple)
-        self._data = None       # loaded payload for that pick
+        self._cv = threading.Condition(self._lock)
+        self._pending = []                       # picks to decode, in order
+        self._done = collections.OrderedDict()   # pick -> payload (or None)
         self._thread = None
 
+    # -- producer side -----------------------------------------------------
+    def ensure(self, picks):
+        """Queue any of `picks` not already decoded or in flight."""
+        with self._cv:
+            for p in picks:
+                if p is not None and p not in self._done \
+                        and p not in self._pending:
+                    self._pending.append(p)
+            if self._pending:
+                if self._thread is None or not self._thread.is_alive():
+                    self._thread = threading.Thread(
+                        target=self._run, name="prefetch", daemon=True)
+                    self._thread.start()
+                self._cv.notify_all()
+
     def start(self, pick):
-        """Begin loading `pick` in the background (no-op if already loading
-        the same thing)."""
-        if pick is None:
-            return
-        with self._lock:
-            if self._pick == pick and (self._data is not None
-                                       or self._thread is not None):
-                return
-            self._pick = pick
-            self._data = None
-            self._thread = threading.Thread(
-                target=self._load, args=(pick,), name="prefetch")
-            self._thread.daemon = True
-            self._thread.start()
+        """Back-compat single-pick entry point."""
+        if pick is not None:
+            self.ensure([pick])
 
+    def flush(self):
+        """Config changed: queued picks may no longer be enabled/valid."""
+        with self._cv:
+            del self._pending[:]
+            self._done.clear()
+
+    # -- consumer side -----------------------------------------------------
     def ready(self, pick):
-        """Non-blocking: is the payload for `pick` loaded? The scheduler must
-        never block on this thread with the panel dark — it extends the clock
-        scene instead."""
+        """Non-blocking; True also for a failed decode (payload None) so the
+        clock never extends waiting for something that cannot arrive."""
         with self._lock:
-            return self._pick == pick and self._data is not None
+            return pick in self._done
 
-    def _load(self, pick):
+    def take(self, pick, timeout=1.0):
+        """-> payload for `pick` (None = load it yourself), waiting briefly."""
+        deadline = time.time() + timeout
+        with self._cv:
+            while pick not in self._done:
+                left = deadline - time.time()
+                if left <= 0:
+                    return None
+                self._cv.wait(left)
+            payload = self._done.pop(pick)
+            # drop stale leftovers (skipped items) beyond the lookahead
+            while len(self._done) > self.depth * 2:
+                self._done.popitem(last=False)
+            return payload
+
+    # -- worker ------------------------------------------------------------
+    def _run(self):
         try:
-            # Linux nice() is per-thread: keep this off the render loop's back
-            # so decoding the next animation can't jitter the clock's blink.
-            # 5, not more — with only ~25% of the core left beside the RT
-            # refresh thread, too little priority makes big GIFs take so long
-            # that the clock has to wait for them anyway.
             os.nice(5)
         except (OSError, AttributeError):
             pass
+        while True:
+            with self._cv:
+                while not self._pending:
+                    self._cv.wait(5.0)
+                pick = self._pending.pop(0)
+            payload = self._decode(pick)
+            with self._cv:
+                self._done[pick] = payload
+                self._cv.notify_all()
+
+    def _decode(self, pick):
         try:
             kind, item = pick
             if kind == "dmd":
                 header, frames = rda.read_rda(item[2])
-                # Unpacking 4bpp -> indexes is the render loop's most
-                # expensive per-frame step; do it here instead.
-                indexes = [rda.unpack_frame(f) for f in frames]
-                payload = (header, frames, indexes)
-            else:
-                payload = scenes.load_gif_frames(item[2], self.canvas)
+                indexes = []
+                for i, f in enumerate(frames):
+                    indexes.append(rda.unpack_frame(f))
+                    if i % (PREFETCH_PACE_EVERY * 2) == 0:
+                        time.sleep(PREFETCH_PACE_S)
+                return (header, frames, indexes)
+            return scenes.load_gif_frames(
+                item[2], self.canvas,
+                pace_every=PREFETCH_PACE_EVERY, pace_s=PREFETCH_PACE_S)
         except Exception:
             traceback.print_exc()
-            payload = None
-        with self._lock:
-            if self._pick == pick:      # still the item we want
-                self._data = payload
-                self._thread = None
-
-    def take(self, pick, timeout=6.0):
-        """-> loaded payload for `pick`, waiting briefly if it is still in
-        flight; None means "load it yourself"."""
-        with self._lock:
-            same = (self._pick == pick)
-            thread = self._thread
-            data = self._data
-        if not same:
             return None
-        if data is None and thread is not None:
-            thread.join(timeout)
-            with self._lock:
-                data = self._data if self._pick == pick else None
-        with self._lock:
-            if self._pick == pick:
-                self._pick = None
-                self._data = None
-        return data
 
 
 def _safe_int(value, default):
@@ -189,6 +218,7 @@ class Scheduler(object):
         self._cycle = 0
         self._backgrounds = scenes.scan_backgrounds()
         self.prefetch = Prefetcher(self.canvas)
+        self._upcoming = []       # picks queued ahead of playback
         self._ui_checked_at = 0.0
         self._ui_active = False
         self._nice_now = None
@@ -324,6 +354,9 @@ class Scheduler(object):
                 self.cfg.load()
                 self.library.refresh()
                 self._backgrounds = scenes.scan_backgrounds()
+                # queued picks may reference newly-disabled content
+                del self._upcoming[:]
+                self.prefetch.flush()
             except Exception:
                 traceback.print_exc()
             try:
@@ -676,20 +709,29 @@ class Scheduler(object):
 
         gap = self.cfg.animation_gap_seconds(self.rng)
 
-        # Choose the next animation BEFORE the clock plays and load it in the
-        # background, so clock -> animation is seamless. Reading an .rda or
-        # decoding a multi-MB GIF off the SD card otherwise leaves the panel
-        # black for seconds after the clock fades out. If the decode is still
-        # running when the dwell ends, the clock simply keeps showing (via
+        # Keep a queue of upcoming animations decoding in the background
+        # (depth absorbs one big GIF followed by small ones), so clock ->
+        # animation is seamless. If the head of the queue is still decoding
+        # when the clock's dwell ends, the clock simply keeps showing (via
         # extend_while) — the panel must never wait on a black screen.
         picked = None
         extend = None
         if gap is not None:
-            picked = self._pick_animation()
-            self.prefetch.start(picked)
-            if picked is not None and not self.fast:
-                pf, pk = self.prefetch, picked
-                extend = lambda: not pf.ready(pk)  # noqa: E731
+            if self.fast:
+                # tests: pick one, decode synchronously below — no threads,
+                # no wall-clock waits, fully deterministic
+                picked = self._pick_animation()
+            else:
+                while len(self._upcoming) < self.prefetch.depth:
+                    nxt = self._pick_animation()
+                    if nxt is None or nxt in self._upcoming:
+                        break
+                    self._upcoming.append(nxt)
+                if self._upcoming:
+                    picked = self._upcoming[0]
+                    self.prefetch.ensure(self._upcoming)
+                    pf, pk = self.prefetch, picked
+                    extend = lambda: not pf.ready(pk)  # noqa: E731
 
         self._play_clock_cycle(gap, extend_while=extend)
         if st.stop_requested:
@@ -707,10 +749,15 @@ class Scheduler(object):
             return
         if picked is None:
             return
+        if self._upcoming and self._upcoming[0] == picked:
+            self._upcoming.pop(0)
         kind, item = picked
-        # after the extend gate this is normally instant; the short timeout
-        # only covers the extend-cap case, after which the scene loads sync
-        preloaded = self.prefetch.take(picked, timeout=1.0)
+        if self.fast:
+            preloaded = None            # deterministic sync load in the scene
+        else:
+            # after the extend gate this is normally instant; the short
+            # timeout only covers the extend-cap case (scene loads sync then)
+            preloaded = self.prefetch.take(picked, timeout=1.0)
         if kind == "dmd":
             self._play_dmd(item[0], item[1], item[2], preloaded=preloaded)
         else:

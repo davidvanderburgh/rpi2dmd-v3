@@ -27,6 +27,9 @@ MIN_FRAME_MS = 20
 GIF_DEFAULT_FRAME_MS = 100
 GIF_MIN_TOTAL_MS = 1500
 CLOCK_TICK_MS = 100
+# Cap for played GIFs: some DLC clips are 500+ frames, which costs seconds
+# of decode on a Pi Zero and overstays on screen anyway (~24s at the cap).
+PLAYBACK_MAX_GIF_FRAMES = 240
 
 # message speeds -> pixels per 40ms frame
 SPEEDS = {
@@ -170,14 +173,20 @@ Image.MAX_IMAGE_PIXELS = 32 * 1024 * 1024
 MAX_GIF_FRAMES = 1200
 
 
-def _load_image_frames(path, target=None):
+def _load_image_frames(path, target=None, max_frames=None,
+                       pace_every=0, pace_s=0.0):
     """Load a (possibly animated) image -> list of (RGB image, duration_ms).
 
     Frames are composited over the previous frame so partial/transparent
     GIF frames render correctly. When target=(w, h) is given, each frame is
     cover-fitted to that size as it is decoded, so a large source GIF never
     holds full-resolution frames in memory.
+
+    pace_every/pace_s: voluntary sleep every N decoded frames — used by the
+    prefetcher so a long decode never monopolizes the GIL while the clock's
+    render thread is trying to hit its second boundary.
     """
+    limit = max_frames or MAX_GIF_FRAMES
     img = Image.open(path)
     frames = []
     base = None
@@ -195,8 +204,10 @@ def _load_image_frames(path, target=None):
         if target is not None:
             out = _fit_cover(out, target[0], target[1])
         frames.append((out, dur))
-        if len(frames) >= MAX_GIF_FRAMES:
+        if len(frames) >= limit:
             break
+        if pace_every and len(frames) % pace_every == 0:
+            time.sleep(pace_s)
     if not frames:
         out = img.convert("RGB")
         if target is not None:
@@ -511,10 +522,14 @@ def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS,
 # GIF scene
 # ---------------------------------------------------------------------------
 
-def load_gif_frames(path, canvas=CANVAS):
+def load_gif_frames(path, canvas=CANVAS, max_frames=None,
+                    pace_every=0, pace_s=0.0):
     """Decode a GIF to canvas-sized frames. Slow on a Pi (big GIFs take
     seconds), so the scheduler prefetches this off the critical path."""
-    return _load_image_frames(path, target=canvas)
+    if max_frames is None:
+        max_frames = PLAYBACK_MAX_GIF_FRAMES
+    return _load_image_frames(path, target=canvas, max_frames=max_frames,
+                              pace_every=pace_every, pace_s=pace_s)
 
 
 def gif_scene(cfg, path, canvas=CANVAS, frames=None):
@@ -522,7 +537,8 @@ def gif_scene(cfg, path, canvas=CANVAS, frames=None):
     single pass (looped until >= 1.5s total), optional clock overlay."""
     w, h = canvas
     if frames is None:
-        frames = _load_image_frames(path, target=(w, h))
+        frames = _load_image_frames(path, target=(w, h),
+                                    max_frames=PLAYBACK_MAX_GIF_FRAMES)
     total = sum(dur for _, dur in frames)
     passes = 1
     if total > 0:

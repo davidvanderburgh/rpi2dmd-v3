@@ -111,6 +111,10 @@ def _crash_loop_guard(cfg):
 
 
 def main(argv=None):
+    # Shorter GIL slices: the prefetch decoder shares the interpreter with
+    # the frame-pacing render loop, and the default 5ms switch interval is
+    # visible jitter at second-boundary precision.
+    sys.setswitchinterval(0.002)
     args = parse_args(argv)
     cfg = config.Config(args.config)
     if not args.sim:
