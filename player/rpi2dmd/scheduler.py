@@ -28,6 +28,20 @@ PREFETCH_DEPTH = 3          # decoded animations kept ahead of playback
 PREFETCH_PACE_EVERY = 8     # frames decoded between voluntary sleeps
 PREFETCH_PACE_S = 0.012     # the sleep: caps GIL bursts so the clock's
                             # render thread never waits behind a decode
+# Memory ceiling for buffered-ahead frames. A 128x32 RGB frame is ~12KB, so
+# 2500 frames ~= 30MB. This is what actually bounds the queue: full-length
+# GIFs (up to ~5000 frames) are NOT truncated, they just reduce how many
+# animations we buffer ahead of them, so we never hold three huge clips at
+# once on a 512MB Pi.
+PREFETCH_FRAME_BUDGET = 2500
+
+
+def _payload_frames(payload):
+    if payload is None:
+        return 0
+    if isinstance(payload, tuple):      # dmd: (header, frames, indexes)
+        return len(payload[1])
+    return len(payload)                 # gif: list of (image, duration)
 
 
 class Prefetcher(object):
@@ -102,9 +116,15 @@ class Prefetcher(object):
             # drop stale leftovers (skipped items) beyond the lookahead
             while len(self._done) > self.depth * 2:
                 self._done.popitem(last=False)
+            # buffered frames just dropped: let the worker resume if the
+            # budget was holding it back
+            self._cv.notify_all()
             return payload
 
     # -- worker ------------------------------------------------------------
+    def _buffered_frames(self):
+        return sum(_payload_frames(p) for p in self._done.values())
+
     def _run(self):
         try:
             os.nice(5)
@@ -112,7 +132,13 @@ class Prefetcher(object):
             pass
         while True:
             with self._cv:
-                while not self._pending:
+                # wait for work, and for the buffered frames to drain below
+                # budget (a long clip already decoded holds back the next),
+                # but always allow at least one item so we never stall the
+                # thing that is due next
+                while not self._pending or (
+                        self._done and
+                        self._buffered_frames() >= PREFETCH_FRAME_BUDGET):
                     self._cv.wait(5.0)
                 pick = self._pending.pop(0)
             payload = self._decode(pick)

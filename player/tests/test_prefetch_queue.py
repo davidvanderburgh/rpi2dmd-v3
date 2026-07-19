@@ -10,6 +10,7 @@ os.environ.setdefault("RPI2DMD_RUN", r"C:\tmp\rpi2dmd-v3-work\run-q")
 sys.path.insert(0, r"C:\Users\david\Documents\development\RPI2DMD\rpi2dmd-v3\player")
 
 from rpi2dmd import scenes, scheduler  # noqa
+from PIL import Image  # noqa
 
 fails = []
 
@@ -60,12 +61,24 @@ pf.ensure(picks)
 pf.flush()
 check("flush leaves nothing ready", not any(pf.ready(p) for p in picks))
 
-# 5. GIF frame cap honored in playback loads
+# 5. explicit max_frames still works, but the default does NOT truncate
 frames = scenes.load_gif_frames(gifs[0], (128, 32), max_frames=5)
-check("max_frames honored", len(frames) <= 5, len(frames))
-default_cap = scenes.load_gif_frames(gifs[0], (128, 32))
-check("default cap is playback cap",
-      len(default_cap) <= scenes.PLAYBACK_MAX_GIF_FRAMES, len(default_cap))
+check("explicit max_frames honored", len(frames) <= 5, len(frames))
+check("no playback frame cap by default",
+      scenes.PLAYBACK_MAX_GIF_FRAMES is None, scenes.PLAYBACK_MAX_GIF_FRAMES)
+full = scenes.load_gif_frames(gifs[0], (128, 32))
+img = Image.open(gifs[0])
+n = getattr(img, "n_frames", 1)
+check("full GIF decoded to all its frames", len(full) == n,
+      "%d of %d" % (len(full), n))
+check("bomb backstop is above the real library max",
+      scenes.MAX_GIF_FRAMES >= 5000, scenes.MAX_GIF_FRAMES)
+
+# 6. memory budget: a long clip holds back further prefetch
+big = scheduler._payload_frames
+check("frame counter: gif payload", big(full) == len(full))
+check("frame counter: dmd payload",
+      big(("h", [b"x"] * 7, [b"y"] * 7)) == 7)
 
 print()
 if fails:

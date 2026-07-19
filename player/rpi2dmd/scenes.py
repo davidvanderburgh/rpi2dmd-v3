@@ -27,9 +27,10 @@ MIN_FRAME_MS = 20
 GIF_DEFAULT_FRAME_MS = 100
 GIF_MIN_TOTAL_MS = 1500
 CLOCK_TICK_MS = 100
-# Cap for played GIFs: some DLC clips are 500+ frames, which costs seconds
-# of decode on a Pi Zero and overstays on screen anyway (~24s at the cap).
-PLAYBACK_MAX_GIF_FRAMES = 240
+# Played GIFs are NOT frame-capped: the whole point is the full animation.
+# (MAX_GIF_FRAMES below is only a decompression-bomb backstop.) The prefetch
+# queue + paced decode absorb the cost of long clips instead.
+PLAYBACK_MAX_GIF_FRAMES = None
 
 # message speeds -> pixels per 40ms frame
 SPEEDS = {
@@ -170,7 +171,10 @@ def _fit_cover(img, w, h, resample=Image.BILINEAR):
 # A 128x32 panel never needs huge sources; reject decompression bombs and
 # keep memory bounded on a Pi (frames are downscaled as they are decoded).
 Image.MAX_IMAGE_PIXELS = 32 * 1024 * 1024
-MAX_GIF_FRAMES = 1200
+# Pure decompression-bomb backstop, set above the real library's longest
+# clip (PINBALL_STORY_STTNG01 = 4958 frames) so no genuine animation is ever
+# truncated. A 128x32 RGB frame is ~12KB, so even this is bounded memory.
+MAX_GIF_FRAMES = 8000
 
 
 def _load_image_frames(path, target=None, max_frames=None,
