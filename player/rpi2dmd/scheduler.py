@@ -55,11 +55,21 @@ class Prefetcher(object):
             self._thread.daemon = True
             self._thread.start()
 
+    def ready(self, pick):
+        """Non-blocking: is the payload for `pick` loaded? The scheduler must
+        never block on this thread with the panel dark — it extends the clock
+        scene instead."""
+        with self._lock:
+            return self._pick == pick and self._data is not None
+
     def _load(self, pick):
         try:
             # Linux nice() is per-thread: keep this off the render loop's back
             # so decoding the next animation can't jitter the clock's blink.
-            os.nice(10)
+            # 5, not more — with only ~25% of the core left beside the RT
+            # refresh thread, too little priority makes big GIFs take so long
+            # that the clock has to wait for them anyway.
+            os.nice(5)
         except (OSError, AttributeError):
             pass
         try:
@@ -522,7 +532,7 @@ class Scheduler(object):
                 self._play_gif(parts[0], parts[1], path)
 
     # -- scene slots ----------------------------------------------------------
-    def _play_clock_cycle(self, gap_seconds):
+    def _play_clock_cycle(self, gap_seconds, extend_while=None):
         cfg = self.cfg
         if cfg.get("clock.enabled", True):
             if gap_seconds is not None:
@@ -531,7 +541,8 @@ class Scheduler(object):
                 dwell = _safe_int(cfg.get("clock.idle_dwell_ms", 6000), 6000)
             sc = scenes.clock_scene(cfg, self.canvas, dwell,
                                     self._backgrounds, rng=self.rng,
-                                    time_fn=self._now)
+                                    time_fn=self._now,
+                                    extend_while=extend_while)
             sc = transitions.wrap(sc, cfg.get("clock.transition", "random"),
                                   self.rng)
             np = {"type": "clock", "game": "", "name": "clock",
@@ -668,13 +679,19 @@ class Scheduler(object):
         # Choose the next animation BEFORE the clock plays and load it in the
         # background, so clock -> animation is seamless. Reading an .rda or
         # decoding a multi-MB GIF off the SD card otherwise leaves the panel
-        # black for seconds after the clock fades out.
+        # black for seconds after the clock fades out. If the decode is still
+        # running when the dwell ends, the clock simply keeps showing (via
+        # extend_while) — the panel must never wait on a black screen.
         picked = None
+        extend = None
         if gap is not None:
             picked = self._pick_animation()
             self.prefetch.start(picked)
+            if picked is not None and not self.fast:
+                pf, pk = self.prefetch, picked
+                extend = lambda: not pf.ready(pk)  # noqa: E731
 
-        self._play_clock_cycle(gap)
+        self._play_clock_cycle(gap, extend_while=extend)
         if st.stop_requested:
             return
         self._cycle += 1
@@ -691,7 +708,9 @@ class Scheduler(object):
         if picked is None:
             return
         kind, item = picked
-        preloaded = self.prefetch.take(picked)
+        # after the extend gate this is normally instant; the short timeout
+        # only covers the extend-cap case, after which the scene loads sync
+        preloaded = self.prefetch.take(picked, timeout=1.0)
         if kind == "dmd":
             self._play_dmd(item[0], item[1], item[2], preloaded=preloaded)
         else:

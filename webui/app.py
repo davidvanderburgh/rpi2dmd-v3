@@ -544,9 +544,20 @@ def _gate():
                     {"WWW-Authenticate": 'Basic realm="RPI2DMD"'})
 
 
+def _asset_version(filename):
+    """mtime-based cache buster: browsers cache static files for hours, so
+    without this a deployed app.js fix can silently not reach the user."""
+    try:
+        return int(os.path.getmtime(
+            os.path.join(_HERE, "static", filename)))
+    except OSError:
+        return 0
+
+
 @app.context_processor
 def _template_globals():
-    return {"nav": NAV, "version": VERSION, "cfg": CFG.data}
+    return {"nav": NAV, "version": VERSION, "cfg": CFG.data,
+            "asset_v": _asset_version}
 
 
 # ---------------------------------------------------------------------------

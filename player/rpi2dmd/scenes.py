@@ -313,14 +313,32 @@ def _render_text_layer(text, font, color, mode):
 # clock scene
 # ---------------------------------------------------------------------------
 
-def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None,
-                time_fn=None):
-    """Standalone clock for dwell_ms. Animated GIF backgrounds advance per
-    their frame durations while the clock keeps re-rendering (hold capped
-    at ~100ms so the blinking colon stays live).
+def _clock_overlay(ck, w, h, tint, gamma, now=None):
+    """The clock text as (color layer, alpha mask) built from the cached
+    intensity grid. Rebuilding this costs real CPU, but the text only
+    changes once a second — callers cache it on (text, suffix, colon)."""
+    grid, _ = clock.render_indexed(ck, w, h, now=now)
+    color = clock._text_color(ck, tint, gamma)
+    alpha = Image.frombytes(
+        "L", (w, h), bytes(bytearray(v * 17 for row in grid for v in row)))
+    layer = Image.new("RGB", (w, h), color)
+    return layer, alpha
 
-    time_fn: the scheduler's clock (simulated under --fast), so blink
-    alignment stays deterministic in tests.
+
+def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None,
+                time_fn=None, extend_while=None, extend_cap_ms=15000):
+    """Standalone clock for dwell_ms.
+
+    The text layer is rebuilt only when the displayed time actually changes
+    (once a second), and each frame's hold lands exactly on the next second
+    boundary — a 10Hz full re-render used to miss beats on the Pi and made
+    the colon blink irregular. Animated backgrounds advance per their own
+    frame durations; the cached text is pasted over them (C-speed).
+
+    time_fn: the scheduler's clock (simulated under --fast).
+    extend_while: keep showing the clock past dwell while this returns True
+    (the scheduler uses it to wait for the next animation's prefetch, so the
+    panel never goes black between clock and animation).
     """
     rng = rng or random
     time_fn = time_fn or time.time
@@ -329,7 +347,6 @@ def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None,
     dwell = int(dwell_ms if dwell_ms is not None
                 else ck.get("idle_dwell_ms", 6000))
     tint, gamma = _display(cfg)
-    fonts_dir = paths.fonts_dir()
 
     bg_frames = None
     bg_path = _resolve_background(ck, backgrounds, rng)
@@ -339,29 +356,50 @@ def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None,
         except (OSError, ValueError, Image.DecompressionBombError):
             bg_frames = None
 
-    blinking = ck.get("colon", "blink") == "blink" or "%S" in str(
-        ck.get("format", ""))
+    outline = bool(ck.get("outline", True)) and bg_frames is not None
+    black = Image.new("RGB", (w, h))
 
     elapsed = 0
     idx = 0
     remaining = bg_frames[0][1] if bg_frames else 0
-    while elapsed < dwell:
+    overlay_key = None
+    layer = alpha = None
+    extended = 0
+    while True:
+        if elapsed >= dwell:
+            if extend_while is None or extended >= extend_cap_ms \
+                    or not extend_while():
+                break
+        now_dt = datetime.datetime.now()
+        text, suffix = clock.time_text(ck, now_dt)
+        colon = clock.colon_visible(ck, now_dt)
+        key = (text, suffix, colon)
+        if key != overlay_key:
+            layer, alpha = _clock_overlay(ck, w, h, tint, gamma, now=now_dt)
+            overlay_key = key
+
         if bg_frames:
-            bg = bg_frames[idx][0]
+            frame = bg_frames[idx][0].copy()
+            if outline:
+                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    frame.paste(black, (dx, dy), alpha)
             hold = min(remaining, CLOCK_TICK_MS)
         else:
-            bg = None
-            hold = CLOCK_TICK_MS
-        if blinking:
-            # Land a frame exactly on the next second so the colon flips on
-            # the beat instead of up to a tick late.
-            to_second = int((1.0 - (time_fn() % 1.0)) * 1000) + 1
-            hold = min(hold, to_second)
-        hold = max(MIN_FRAME_MS, min(hold, dwell - elapsed))
-        frame = clock.render_scene(ck, w, h, background=bg, tint=tint,
-                                   gamma=gamma, fonts_dir=fonts_dir)
+            frame = black.copy()
+            hold = 1000  # nothing else moves: one frame per second
+        frame.paste(layer, (0, 0), alpha)
+
+        # land the next frame exactly on the second so the colon flips on
+        # the beat (and the minute rolls over on time)
+        to_second = int((1.0 - (time_fn() % 1.0)) * 1000) + 1
+        hold = min(hold, to_second)
+        if elapsed < dwell:
+            hold = min(hold, dwell - elapsed)
+        hold = max(MIN_FRAME_MS, hold)
         yield frame, hold
         elapsed += hold
+        if elapsed > dwell:
+            extended += hold
         if bg_frames:
             remaining -= hold
             if remaining <= 0:
