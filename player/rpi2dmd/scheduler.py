@@ -621,7 +621,12 @@ class Scheduler(object):
     def _play_gif(self, category, filename, path, preloaded=None):
         cfg = self.cfg
         if preloaded is None and not self.fast:
-            preloaded = _cached_gif(category, filename, path)
+            clip = _cached_gif(category, filename, path)
+            if clip is not None:
+                # 2-4s of synchronous bulk materialize beats a whole clip
+                # of lazy per-frame decode (~36ms/frame = stutter); very
+                # long clips return None from materialize and stay lazy
+                preloaded = clip.materialize() or clip
         show = cfg.get("playback.show_name", "hide")
         title = os.path.splitext(filename)[0].replace("_", " ")
         if show == "before":
