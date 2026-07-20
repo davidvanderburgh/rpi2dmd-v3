@@ -1,0 +1,9 @@
+# Shell scripts run inside WSL/Linux (image build, media staging) and the
+# systemd/firstboot files land on the Pi's rootfs: they MUST stay LF even
+# when the repo is cloned on Windows with core.autocrlf=true — bash fails
+# outright on CRLF. Python is LF for consistency.
+*.sh    text eol=lf
+*.py    text eol=lf
+*.service text eol=lf
+*.json  text eol=lf
+*.md    text
