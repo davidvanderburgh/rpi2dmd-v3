@@ -105,7 +105,9 @@ def union_gif_count(roots):
             if os.path.isdir(cdir):
                 for f in os.listdir(cdir):
                     if f.lower().endswith(".gif"):
-                        seen.add((cat, f.lower()))
+                        # case-fold both parts: the target FAT volume is
+                        # case-insensitive
+                        seen.add((cat.lower(), f.lower()))
     return len(seen)
 
 

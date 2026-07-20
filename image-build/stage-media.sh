@@ -147,13 +147,16 @@ SRC_RDAS=$(find "$CONTENT/dmd" -type f -name '*.rda' | wc -l)
 # Expected gif count = the union of every staged source (later sources
 # overwrite same-named files, so count distinct relative paths). Content
 # is user-supplied and cherry-picked, so no magic thresholds here — the
-# staged tree must match the sources exactly.
+# staged tree must match the sources exactly. Case-fold before deduping:
+# the target is FAT, which is case-insensitive, so Foo.gif in one pack
+# and foo.GIF in another stage as ONE file (19 such pairs exist between
+# the v2 stock set and the 10K DLC).
 list_gifs() { [ -d "$1" ] && (cd "$1" && find . -type f -iname '*.gif'); }
 EXPECT=$( { list_gifs "$CONTENT/media-base/gif"
             [ "$LITE" != 1 ] && list_gifs "$CONTENT/gif-extra"
             [ "$LITE" != 1 ] && [ -n "${DLC_GIF:-}" ] && list_gifs "$DLC_GIF"
             [ "$LITE" != 1 ] && [ -n "${BON_GIF:-}" ] && list_gifs "$BON_GIF"
-          } | sort -u | wc -l )
+          } | tr '[:upper:]' '[:lower:]' | sort -u | wc -l )
 [ "$GIFS" -eq "$EXPECT" ] || fail "gif count mismatch: staged $GIFS != expected union $EXPECT"
 
 log "OK"
