@@ -498,12 +498,17 @@ def _resolve_overlay(cfg, header):
     else:
         return None, "large", None, 0, last
     size_hint = "small" if meta.get("size") == "ClockSmall" else "large"
-    x = int(meta.get("x", 0))
-    y = int(meta.get("y", 0))
-    override_xy = (x, y) if (x or y) else None
+    # Small clocks anchor at metadata x/y (top-left of the digits); large
+    # ones are full-screen faces whose raw x/y are always 0 — centered.
+    if size_hint == "small":
+        override_xy = (int(meta.get("x", 0)), int(meta.get("y", 0)))
+    else:
+        override_xy = None
     start = max(0, int(meta.get("start_frame", 0)))
     end = int(meta.get("end_frame", 0))
-    if end <= 0:
+    if end <= 0 or end < start:
+        # 0 = "until the animation ends" (B237 sentinel); end<start occurs
+        # on 3 animations as an extractor artifact — show rather than drop
         end = last
     return mode, size_hint, override_xy, start, end
 
@@ -552,6 +557,15 @@ def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS,
         name_layer = _name_overlay(
             header.get("name", "").replace("_", " "), w, h)
 
+    # The overlay clock is placed by animation metadata (small) or centered
+    # (large full-screen faces) — never by the user's standalone clock-scene
+    # align/x/y, which used to drag the overlay around on every ClockLarge
+    # animation. Style/font/shade/colon settings still apply.
+    ck_ov = dict(ck)
+    ck_ov["align"] = "center"
+    ck_ov["x"] = 0
+    ck_ov["y"] = 0
+
     durations = header.get("durations", [])
     for i, packed in enumerate(frames):
         base = indexes[i] if indexes is not None else rda.unpack_frame(packed)
@@ -565,14 +579,18 @@ def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS,
             idx = base
             if overlay:
                 # composite copies `base`; each segment must start from the
-                # pristine frame — 'back' mode fills black pixels and
-                # 'front' burns an outline, so recompositing over the
+                # pristine frame — 'back' mode fills transparency pixels
+                # and 'front' burns an outline, so recompositing over the
                 # previous segment's output would bake in the old colon
                 grid, _ = clock.render_indexed(
-                    ck, rda.WIDTH, rda.HEIGHT, now=now_dt,
+                    ck_ov, rda.WIDTH, rda.HEIGHT, now=now_dt,
                     size_hint=size_hint, override_xy=override_xy)
                 idx = clock.composite_clock_indexed(
                     idx, grid, mode, outline=(outline and mode == "front"))
+            # B237 transparency (index 10) renders as black once the clock
+            # has been composited into it — it used to draw at 67%
+            # brightness, washing whole backgrounds in amber
+            idx = rda.flatten_transparency(idx)
             img = Image.frombytes("P", (rda.WIDTH, rda.HEIGHT), idx)
             img.putpalette(palette)
             img = img.convert("RGB")

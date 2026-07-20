@@ -12,6 +12,14 @@ File layout (little-endian):
                  (128x32 pixels, 4bpp, row-major, 2 pixels/byte,
                   high nibble = left pixel, values 0..15)
 
+Pixel value semantics (B237 heritage — verified against the raw Run-DMD
+image and the RunDMD-Utils editor source): 0 = opaque black, 1..9 and
+11..15 = brightness levels, and 10 (0xA) = TRANSPARENCY, not a shade.
+It is 23.7%% of all pixels in the library (neighbors 8/9/11 are ~0%%)
+and averages 48%% of ClockBehind animations: it marks where the clock
+shows through (ClockBehind) and renders as black when nothing is
+behind. Flatten it with flatten_transparency() before display.
+
 Header JSON keys:
     name             str   animation name, e.g. "ATTACK_FROM_MARS_006"
     game             str   game folder name, e.g. "ATTACK_FROM_MARS"
@@ -46,6 +54,20 @@ _UNPACK = [bytes((b >> 4, b & 0x0F)) for b in range(256)]
 CLOCK_NONE = "NoClock"
 CLOCK_ON_TOP = "ClockOnTop"
 CLOCK_BEHIND = "ClockBehind"
+
+# B237 reserved index: transparency (see module docstring).
+TRANSPARENT = 10
+
+# bytes.translate table mapping the transparency index to black for
+# display, once compositing (which needs the distinction) is done.
+_FLATTEN = bytes(0 if i == TRANSPARENT else min(i, 255)
+                 for i in range(256))
+
+
+def flatten_transparency(indexes):
+    """Index buffer -> same buffer with transparency rendered as black.
+    Call after clock compositing: 'back' mode keys on TRANSPARENT."""
+    return bytes(indexes).translate(_FLATTEN)
 
 
 def write_rda(path, header, frames):
@@ -164,9 +186,10 @@ GAME_TINTS = {
 
 DEFAULT_TINT = "amber"
 # Linear by default: rpi-rgb-led-matrix already applies its own CIE1931
-# luminance correction, so an extra gamma here double-darkens. Run-DMD
-# content is dominated by level 10 (the "lit" shade), which a 1.6 gamma
-# crushed to 52% brightness — the panel looked washed out.
+# luminance correction, so an extra gamma here double-darkens. (An older
+# comment claimed level 10 was the "lit" shade — level 10 is actually the
+# transparency index; it only dominated because backgrounds are mostly
+# transparent. The linear ramp still looks right on the panel.)
 DEFAULT_GAMMA = 1.0
 
 
@@ -188,11 +211,17 @@ def build_palette(tint=DEFAULT_TINT, gamma=DEFAULT_GAMMA):
     return pal
 
 
-def frame_to_image(packed, palette=None):
-    """2048-byte packed frame -> PIL 'P' mode Image with palette applied."""
+def frame_to_image(packed, palette=None, flatten_transparent=True):
+    """2048-byte packed frame -> PIL 'P' mode Image with palette applied.
+
+    flatten_transparent: render the transparency index as black, matching
+    what the panel shows for a standalone frame (previews want this)."""
     from PIL import Image
 
-    img = Image.frombytes("P", (WIDTH, HEIGHT), unpack_frame(packed))
+    idx = unpack_frame(packed)
+    if flatten_transparent:
+        idx = flatten_transparency(idx)
+    img = Image.frombytes("P", (WIDTH, HEIGHT), idx)
     img.putpalette(palette if palette is not None else build_palette())
     return img
 

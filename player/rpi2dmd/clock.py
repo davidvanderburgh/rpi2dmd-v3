@@ -233,8 +233,12 @@ def composite_clock_indexed(anim_indexes, grid, mode, outline=False):
     index space (bytes of 0..15, len = w*h).
 
     mode: "front" (clock over animation) or "back" (animation over clock,
-    clock visible through black animation pixels).
-    -> new bytes of indexes.
+    clock visible through the animation's TRANSPARENCY pixels — B237
+    reserves index 10 for exactly this; 0 is opaque black and must stay
+    black, otherwise digits bleed through dark artwork and never appear
+    in the designated clock windows).
+    -> new bytes of indexes (may still contain the transparency index —
+    callers flatten it to black for display via rda.flatten_transparency).
     """
     out = bytearray(anim_indexes)
     lit, ring = _grid_sparse(grid)
@@ -246,7 +250,7 @@ def composite_clock_indexed(anim_indexes, grid, mode, outline=False):
             out[i] = v
     else:  # back
         for i, v in lit:
-            if out[i] == 0:
+            if out[i] == rda.TRANSPARENT:
                 out[i] = v
     return bytes(out)
 
