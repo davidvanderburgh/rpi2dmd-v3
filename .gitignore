@@ -6,3 +6,8 @@ node_modules/
 /dist/
 *.img
 *.rda
+
+# Run-DMD-derived assets: extracted from the user's own B237 image at
+# build time (builder) or during development - NEVER committed. The
+# repo ships no copyrighted content.
+player/rpi2dmd/assets/
