@@ -113,8 +113,10 @@ check("materialized == lazy (pixels + durations)", same)
 check("materialized frames are RGB StripFrames",
       mat[0][0].mode == "RGB" and hasattr(mat[0][0], "strip"),
       type(mat[0][0]))
-check("all StripFrames share ONE strip image",
-      all(m[0].strip is mat[0][0].strip for m in mat))
+import math  # noqa: E402
+n_strips = len(set(id(m[0].strip) for m in mat))
+check("StripFrames grouped into slab strips",
+      n_strips <= math.ceil(len(mat) / 32.0), n_strips)
 
 # 6b. drivers render StripFrames: sim driver realizes correctly
 from rpi2dmd import matrix  # noqa: E402

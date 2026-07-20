@@ -207,21 +207,29 @@ class RgfClip(object):
         import time
         from PIL import Image
 
+        # Slabs, not one giant strip: a whole-clip convert is a single C
+        # call that holds the GIL ~1-2s under load — the render thread
+        # missed frames whenever the worker prepared the NEXT clip
+        # (measured +4.6s stretch on a 90s clip). 32-frame slabs bound
+        # every hold to tens of ms; frames reference their slab directly.
         n = len(self)
-        parts = []
-        for i in range(n):
-            parts.append(self._raw(i))
-            if pace_every and (i + 1) % pace_every == 0:
+        slab_frames = 32
+        out = []
+        for s0 in range(0, n, slab_frames):
+            s1 = min(s0 + slab_frames, n)
+            raw = b"".join(self._raw(i) for i in range(s0, s1))
+            slab = Image.frombytes(
+                "P", (self.width, self.height * (s1 - s0)), raw)
+            slab.putpalette(self.palette)
+            slab = slab.convert("RGB")
+            slab.load()
+            for i in range(s0, s1):
+                out.append((StripFrame(slab, (i - s0) * self.height,
+                                       self.width, self.height),
+                            self.durations[i]))
+            if pace_every:
                 time.sleep(pace_s)
-        strip = Image.frombytes("P", (self.width, self.height * n),
-                                b"".join(parts))
-        del parts
-        strip.putpalette(self.palette)
-        strip = strip.convert("RGB")   # ONE conversion for the whole clip
-        strip.load()
-        return [(StripFrame(strip, i * self.height, self.width,
-                            self.height), self.durations[i])
-                for i in range(n)]
+        return out
 
 
 class StripFrame(object):
