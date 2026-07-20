@@ -187,7 +187,14 @@ class Prefetcher(object):
                 return (header, frames, indexes)
             clip = _cached_gif(item[0], item[1], item[2])
             if clip is not None:
-                return clip
+                # Bulk-materialize to ready RGB frames here in the worker:
+                # lazy per-frame decode cost ~36ms on the Pi and stuttered
+                # fast clips in the render loop. Very long clips (None)
+                # stay lazy — their memory cost would be unbounded.
+                frames = clip.materialize(
+                    pace_every=PREFETCH_PACE_EVERY * 4,
+                    pace_s=PREFETCH_PACE_S)
+                return frames if frames is not None else clip
             return scenes.load_gif_frames(
                 item[2], self.canvas,
                 pace_every=PREFETCH_PACE_EVERY, pace_s=PREFETCH_PACE_S,

@@ -69,8 +69,9 @@ deadline = time.time() + 15
 while not pf.ready(pick) and time.time() < deadline:
     time.sleep(0.05)
 payload = pf.take(pick, timeout=1.0)
-check("prefetch returns RgfClip from cache",
-      isinstance(payload, rgf.RgfClip), type(payload))
+check("prefetch returns materialized frames from cache",
+      isinstance(payload, list) and len(payload) == len(clip) and
+      payload[0][0].mode == "RGB", type(payload))
 
 # 3. stale guard: wrong src_size -> cache ignored, real decode used
 rgf.write_rgf(rgf_path, frames, src_size=os.path.getsize(src) + 999)
@@ -99,6 +100,52 @@ check("gif_scene frames render", out[0][0].size == (128, 32))
 # 5. _payload_frames counts RgfClip for the prefetch frame budget
 check("frame budget counts RgfClip",
       scheduler._payload_frames(clip) == len(clip))
+
+# 6. bulk materialize: identical pixels to lazy iteration, RGB mode
+mat = clip.materialize()
+check("materialize returns all frames", mat is not None and
+      len(mat) == len(clip), mat and len(mat))
+lazy = list(clip)
+same = all(m[0].convert("RGB").tobytes() ==
+           l[0].convert("RGB").tobytes() and m[1] == l[1]
+           for m, l in zip(mat, lazy))
+check("materialized == lazy (pixels + durations)", same)
+check("materialized frames are RGB", mat[0][0].mode == "RGB",
+      mat[0][0].mode)
+
+# 7. over-long clips refuse bulk materialization (stay lazy)
+old_max = rgf.MATERIALIZE_MAX_FRAMES
+rgf.MATERIALIZE_MAX_FRAMES = len(clip) - 1
+check("too-long clip stays lazy", clip.materialize() is None)
+rgf.MATERIALIZE_MAX_FRAMES = old_max
+
+# 8. v1 container still readable (lazy path)
+import json as _json  # noqa: E402
+import struct as _struct  # noqa: E402
+import zlib as _zlib  # noqa: E402
+v1_frames = [f for f, _ in frames[:3]]
+v1_chunks = []
+for img in v1_frames:
+    p = img.convert("P", palette=Image.ADAPTIVE, colors=256)
+    pal = (p.getpalette() or []) + [0] * 768
+    v1_chunks.append(_zlib.compress(bytes(bytearray(pal[:768])) +
+                                    p.tobytes(), 9))
+v1_header = _json.dumps({
+    "version": 1, "width": 128, "height": 32, "num_frames": 3,
+    "durations": [100, 100, 100],
+    "chunk_lengths": [len(c) for c in v1_chunks],
+    "src_size": 0}).encode()
+v1_path = os.path.join(cache_root, "v1test.rgf")
+with open(v1_path, "wb") as f:
+    f.write(b"RGF1")
+    f.write(_struct.pack("<I", len(v1_header)))
+    f.write(v1_header)
+    for c in v1_chunks:
+        f.write(c)
+v1 = rgf.RgfClip(v1_path)
+check("v1 clip readable", len(v1) == 3 and v1.version == 1)
+check("v1 lazy frames render", list(v1)[0][0].size == (128, 32))
+check("v1 refuses bulk materialize", v1.materialize() is None)
 
 shutil.rmtree(cache_root, ignore_errors=True)
 print()
