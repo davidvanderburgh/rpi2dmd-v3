@@ -299,6 +299,9 @@ log "step 5: chroot setup (apt + rpi-rgb-led-matrix build; this takes a long tim
 cp /usr/bin/qemu-arm-static "$NR/usr/bin/qemu-arm-static"
 cp "$SCRIPT_DIR/chroot-setup.sh" "$NR/tmp/chroot-setup.sh"
 cp "$RGB_TARBALL" "$NR/tmp/rgb-matrix.tar.gz"
+# blit-patched python binding source (see docs/binding-blit.md)
+cp "$SCRIPT_DIR/patches/rgbmatrix-core-blit.pyx" \
+   "$NR/tmp/rgbmatrix-core-blit.pyx" || fail "blit patch missing"
 
 # resolv.conf: stage the host's for the chroot, restore the original after
 cp -a "$NR/etc/resolv.conf" "$NR/etc/resolv.conf.rpi2dmd-orig" 2>/dev/null || true

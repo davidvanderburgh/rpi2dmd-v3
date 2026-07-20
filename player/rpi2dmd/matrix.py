@@ -92,6 +92,10 @@ class RgbMatrixDriver(BaseDriver):
         self.width = opts.cols * opts.chain_length
         self.height = opts.rows * opts.parallel
         self._safe_path = False
+        # Patched binding (see docs/binding-blit.md): raw-bytes blit that
+        # needs no PIL scratch image and accepts buffers from any thread.
+        # Absent on a stock binding -> the classic SetImage paths below.
+        self._blit_bytes = hasattr(self._canvas, "SetImageBytes")
         self._scratch = self._make_scratch()
 
     def _make_scratch(self):
@@ -119,17 +123,25 @@ class RgbMatrixDriver(BaseDriver):
             # StripFrame: one clipped paste straight from the shared
             # realized strip — zero per-frame PIL objects (rgf.py)
             self._scratch.paste(image.strip, (0, -image.y))
+            image = None
         else:
             if image.mode != "RGB":
                 image = image.convert("RGB")
             if image.size != (self.width, self.height):
                 image = image.resize((self.width, self.height))
-            self._scratch.paste(image, (0, 0))  # in place: address stays
         try:
-            if self._safe_path:
-                self._canvas.SetImage(self._scratch, 0, 0, False)
+            if image is not None and self._blit_bytes:
+                # one C copy out of the image, then a sequential nogil
+                # blit — no scratch paste, and safe from any thread
+                self._canvas.SetImageBytes(image.tobytes(),
+                                           self.width, self.height)
             else:
-                self._canvas.SetImage(self._scratch)
+                if image is not None:
+                    self._scratch.paste(image, (0, 0))  # in place
+                if self._safe_path:
+                    self._canvas.SetImage(self._scratch, 0, 0, False)
+                else:
+                    self._canvas.SetImage(self._scratch)
         except (OverflowError, ValueError) as e:
             sys.stderr.write("matrix: dropped frame (%s)\n" % e)
             return

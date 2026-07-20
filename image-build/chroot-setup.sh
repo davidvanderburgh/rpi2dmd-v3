@@ -42,6 +42,13 @@ tar -xzf /tmp/rgb-matrix.tar.gz -C /tmp
 RGB_SRC=$(echo /tmp/rpi-rgb-led-matrix-*)
 [ -d "$RGB_SRC" ] || { echo "rgb-matrix source dir missing"; exit 1; }
 cd "$RGB_SRC/bindings/python"
+# blit patch: row-major nogil SetPixelsPillow + SetImageBytes (raw RGB24
+# blit, no PIL scratch, thread-safe) — see docs/binding-blit.md. core.cpp
+# in the tarball was generated from the stock pyx, so regenerate it
+# (language_level 2: the source uses implicit relative cimports).
+cp /tmp/rgbmatrix-core-blit.pyx rgbmatrix/core.pyx
+rm -f rgbmatrix/core.cpp
+cython3 --cplus rgbmatrix/core.pyx -o rgbmatrix/core.cpp
 make build-python PYTHON=/usr/bin/python3 -j4
 # plain distutils-style install (no egg, no pkg_resources dependency)
 python3 setup.py install --single-version-externally-managed \
@@ -51,6 +58,7 @@ cd /
 
 echo "== [chroot] import check A (with build toolchain present)"
 python3 -c 'import rgbmatrix, flask, PIL; print("CHROOT-CHECK-A OK flask=%s pil=%s" % (flask.__version__, PIL.__version__))'
+python3 -c 'from rgbmatrix import core; assert hasattr(core.Canvas, "SetImageBytes"), "blit patch missing from built binding"; print("CHROOT-CHECK-A2 OK SetImageBytes present")'
 python3 -c 'import sys; sys.path.insert(0, "/opt/rpi2dmd-v3/player"); import rpi2dmd.main; print("CHROOT-CHECK-B OK rpi2dmd.main imports")'
 
 echo "== [chroot] recording package versions"
