@@ -64,8 +64,15 @@ def retime_fast_clip(frames, min_hold=MIN_HOLD_MS):
 
 
 def build_one(job):
-    """(src, dst, force) -> (status, src, frames, src_b, out_b, err)."""
-    src, dst, force = job
+    """(src, dst, force, min_frames, target) -> (status, src, frames,
+    src_b, out_b, err).
+
+    All parameters travel IN THE JOB TUPLE, not module globals: Windows
+    multiprocessing spawns fresh workers that re-import this module, so a
+    global mutated in the parent (the old --min-frames plumbing) silently
+    reverts to its default in every worker.
+    """
+    src, dst, force, min_frames, target = job
     from PIL import Image
     from rpi2dmd import rgf, scenes
 
@@ -74,9 +81,9 @@ def build_one(job):
             return ("skipped", src, 0, 0, os.path.getsize(dst), "")
         with Image.open(src) as probe:
             nf = getattr(probe, "n_frames", 1)
-        if nf < MIN_FRAMES:
+        if nf < min_frames:
             return ("under_threshold", src, nf, 0, 0, "")
-        frames = scenes._load_image_frames(src, target=TARGET)
+        frames = scenes._load_image_frames(src, target=target)
         frames = retime_fast_clip(frames)
         rgf.write_rgf(dst, frames, src_size=os.path.getsize(src))
         return ("built", src, len(frames), os.path.getsize(src),
@@ -85,7 +92,7 @@ def build_one(job):
         return ("failed", src, 0, 0, 0, "%s: %s" % (type(e).__name__, e))
 
 
-def find_jobs(src_root, out_root, force):
+def find_jobs(src_root, out_root, force, min_frames, target):
     jobs = []
     for cat in sorted(os.listdir(src_root)):
         cdir = os.path.join(src_root, cat)
@@ -95,7 +102,7 @@ def find_jobs(src_root, out_root, force):
             if f.lower().endswith(".gif"):
                 jobs.append((os.path.join(cdir, f),
                              os.path.join(out_root, cat, f + ".rgf"),
-                             force))
+                             force, min_frames, target))
     return jobs
 
 
@@ -131,7 +138,7 @@ def main():
     TARGET = (int(w), int(h))
     MIN_FRAMES = args.min_frames
 
-    jobs = find_jobs(args.src, args.out, args.force)
+    jobs = find_jobs(args.src, args.out, args.force, MIN_FRAMES, TARGET)
     if args.limit:
         jobs = jobs[:args.limit]
     print("%d gifs, %d workers, target %dx%d, min-frames %d"
