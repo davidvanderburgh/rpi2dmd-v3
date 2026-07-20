@@ -1,0 +1,6 @@
+{
+  "id": "base-v2",
+  "title": "RPI2DMD v2 base image",
+  "kind": "base-image",
+  "match": ["*rpi2dmd_v2*.img", "*rpi2dmd*v2*.img"]
+}

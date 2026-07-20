@@ -4,15 +4,24 @@
 # import checks. Prints PASS/FAIL lines; exits nonzero if anything FAILs.
 #
 # Usage: verify-image.sh --img PATH [--lite]
+#                        [--min-rdas N] [--min-gifs N] [--min-cats N]
+#
+# The --min-* overrides exist for builder-assembled images where content
+# is user-supplied and cherry-picked: the orchestrator passes the counts
+# it actually staged instead of the full-library defaults.
 
 set -u
 
 IMG=
 LITE=0
+MIN_RDAS= MIN_GIFS= MIN_CATS=
 while [ $# -gt 0 ]; do
     case "$1" in
         --img)  IMG=$2; shift 2 ;;
         --lite) LITE=1; shift ;;
+        --min-rdas) MIN_RDAS=$2; shift 2 ;;
+        --min-gifs) MIN_GIFS=$2; shift 2 ;;
+        --min-cats) MIN_CATS=$2; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -129,12 +138,15 @@ fi
 # ---------------------------------------------------------------------------
 check "p3: dmd/index.json" test -f "$M/dmd/index.json"
 RDAS=$(find "$M/dmd" -type f -name '*.rda' 2>/dev/null | wc -l)
-if [ "$RDAS" -ge 2379 ]; then ok "p3: $RDAS RDA animations (>=2379)"; else bad "p3: only $RDAS RDA animations (<2379)"; fi
+MINRDAS=${MIN_RDAS:-2379}
+if [ "$RDAS" -ge "$MINRDAS" ]; then ok "p3: $RDAS RDA animations (>=$MINRDAS)"; else bad "p3: only $RDAS RDA animations (<$MINRDAS)"; fi
 CATS=$(find "$M/gif" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-MINCATS=15; [ "$LITE" = 1 ] && MINCATS=8
+MINCATS=${MIN_CATS:-15}
+[ -z "$MIN_CATS" ] && [ "$LITE" = 1 ] && MINCATS=8
 if [ "$CATS" -ge "$MINCATS" ]; then ok "p3: $CATS gif categories (>=$MINCATS)"; else bad "p3: only $CATS gif categories (<$MINCATS)"; fi
 GIFS=$(find "$M/gif" -type f -iname '*.gif' 2>/dev/null | wc -l)
-MINGIFS=10200; [ "$LITE" = 1 ] && MINGIFS=550
+MINGIFS=${MIN_GIFS:-10200}
+[ -z "$MIN_GIFS" ] && [ "$LITE" = 1 ] && MINGIFS=550
 if [ "$GIFS" -ge "$MINGIFS" ]; then ok "p3: $GIFS gif files (>=$MINGIFS)"; else bad "p3: only $GIFS gif files (<$MINGIFS)"; fi
 FONTS=$(find "$M/fonts" -type f 2>/dev/null | wc -l)
 if [ "$FONTS" -ge 10 ]; then ok "p3: fonts/ populated ($FONTS files)"; else bad "p3: fonts/ looks empty ($FONTS files)"; fi

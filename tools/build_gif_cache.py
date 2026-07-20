@@ -99,6 +99,21 @@ def find_jobs(src_root, out_root, force):
     return jobs
 
 
+def main_with_args(src, out, min_frames=8, workers=None, force=False):
+    """Programmatic entry point (used by builder/build.py)."""
+    argv = [src, out, "--min-frames", str(min_frames)]
+    if workers:
+        argv += ["--workers", str(workers)]
+    if force:
+        argv += ["--force"]
+    old = sys.argv
+    sys.argv = [old[0]] + argv
+    try:
+        return main()
+    finally:
+        sys.argv = old
+
+
 def main():
     global TARGET, MIN_FRAMES
     ap = argparse.ArgumentParser()

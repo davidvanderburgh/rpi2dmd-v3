@@ -30,7 +30,19 @@ Run-DMD-class pinball DMD clock:
 
 ## Building the image
 
-See `image-build/README.md`. In short (Windows + WSL2):
+**This repository contains no copyrighted content.** To build an image,
+you supply the source artifacts you own (your v2 base image, optionally
+your Run-DMD SD dump and any GIF packs) and run the builder — see
+**`builder/BUILDING.md`**:
+
+```powershell
+python builder\build.py --inputs <your inputs dir> --out RPI2DMD_v3.img
+```
+
+Every pack except the v2 base image is optional; supply whichever you
+have and the image contains exactly that. Maintainers with a pre-staged
+content dir can still use the legacy direct path
+(see `image-build/README.md`):
 
 ```powershell
 cd image-build

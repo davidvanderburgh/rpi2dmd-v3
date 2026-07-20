@@ -1,0 +1,8 @@
+{
+  "id": "gifs-bonus200",
+  "title": "DLC Bonus Pack (200 gifs)",
+  "kind": "gif-pack",
+  "match": ["*bonus pack*gifs*"],
+  "password": "filename_token",
+  "priority": 30
+}

@@ -1,0 +1,8 @@
+{
+  "id": "gifs-ultimate10k",
+  "title": "ULTIMATE GIFS DLC 10K (RpiTeaM)",
+  "kind": "gif-pack",
+  "match": ["*ultimate gifs dlc_10k*"],
+  "password": "filename_token",
+  "priority": 20
+}

@@ -33,17 +33,24 @@ log "gif/ <- media-base"
 RS "$CONTENT/media-base/gif/" "$P3/gif/" || fail "media-base gif copy failed"
 
 if [ "$LITE" != 1 ]; then
-    DLC_GIF=$(find "$CONTENT/dlc10k" -maxdepth 4 -type d -iname gif 2>/dev/null | head -n 1)
-    [ -n "$DLC_GIF" ] || fail "dlc10k gif dir not found under $CONTENT/dlc10k"
-    log "gif/ <- dlc10k ($DLC_GIF)"
-    RS "$DLC_GIF/" "$P3/gif/" || fail "dlc10k gif copy failed"
+    if [ -d "$CONTENT/gif-extra" ]; then
+        log "gif/ <- gif-extra (builder-merged packs)"
+        RS "$CONTENT/gif-extra/" "$P3/gif/" || fail "gif-extra copy failed"
+    elif [ -d "$CONTENT/dlc10k" ] || [ -d "$CONTENT/bonus" ]; then
+        DLC_GIF=$(find "$CONTENT/dlc10k" -maxdepth 4 -type d -iname gif 2>/dev/null | head -n 1)
+        [ -n "$DLC_GIF" ] || fail "dlc10k gif dir not found under $CONTENT/dlc10k"
+        log "gif/ <- dlc10k ($DLC_GIF)"
+        RS "$DLC_GIF/" "$P3/gif/" || fail "dlc10k gif copy failed"
 
-    BON_GIF=$(find "$CONTENT/bonus" -maxdepth 4 -type d -iname gif 2>/dev/null | head -n 1)
-    [ -n "$BON_GIF" ] || fail "bonus gif dir not found under $CONTENT/bonus"
-    log "gif/ <- bonus ($BON_GIF)"
-    RS "$BON_GIF/" "$P3/gif/" || fail "bonus gif copy failed"
+        BON_GIF=$(find "$CONTENT/bonus" -maxdepth 4 -type d -iname gif 2>/dev/null | head -n 1)
+        [ -n "$BON_GIF" ] || fail "bonus gif dir not found under $CONTENT/bonus"
+        log "gif/ <- bonus ($BON_GIF)"
+        RS "$BON_GIF/" "$P3/gif/" || fail "bonus gif copy failed"
+    else
+        log "no extra gif packs staged"
+    fi
 else
-    log "lite build: skipping dlc10k + bonus packs"
+    log "lite build: skipping extra gif packs"
 fi
 
 # Pre-decoded GIF cache (tools/build_gif_cache.py output). Optional: the
@@ -111,7 +118,7 @@ Configuration
 
 Content on this partition
 -------------------------
-  gif\<Category>\*.gif   GIF library (v2 stock + ULTIMATE 10K DLC + bonus)
+  gif\<Category>\*.gif   GIF library (stock + whichever packs were built in)
   gif-cache\             pre-decoded GIF cache (auto-used; safe to delete —
                          playback of long GIFs just gets much slower)
   dmd\<GAME>\*.rda       Run-DMD animation library (2,379 animations)
@@ -136,13 +143,18 @@ log "counts: $GIFS gifs in $CATS categories, $RDAS rda, $FONTS font files"
 SRC_RDAS=$(find "$CONTENT/dmd" -type f -name '*.rda' | wc -l)
 [ "$RDAS" -eq "$SRC_RDAS" ] || fail "rda count mismatch: staged $RDAS != source $SRC_RDAS"
 [ "$FONTS" -ge 10 ] || fail "fonts look incomplete ($FONTS files)"
-if [ "$LITE" != 1 ]; then
-    [ "$GIFS" -ge 10200 ] || fail "gif count too low for a full build: $GIFS"
-    [ "$CATS" -ge 15 ] || fail "gif category count too low for a full build: $CATS"
-else
-    [ "$GIFS" -ge 550 ] || fail "gif count too low for a lite build: $GIFS"
-    [ "$CATS" -ge 8 ] || fail "gif category count too low for a lite build: $CATS"
-fi
+
+# Expected gif count = the union of every staged source (later sources
+# overwrite same-named files, so count distinct relative paths). Content
+# is user-supplied and cherry-picked, so no magic thresholds here — the
+# staged tree must match the sources exactly.
+list_gifs() { [ -d "$1" ] && (cd "$1" && find . -type f -iname '*.gif'); }
+EXPECT=$( { list_gifs "$CONTENT/media-base/gif"
+            [ "$LITE" != 1 ] && list_gifs "$CONTENT/gif-extra"
+            [ "$LITE" != 1 ] && [ -n "${DLC_GIF:-}" ] && list_gifs "$DLC_GIF"
+            [ "$LITE" != 1 ] && [ -n "${BON_GIF:-}" ] && list_gifs "$BON_GIF"
+          } | sort -u | wc -l )
+[ "$GIFS" -eq "$EXPECT" ] || fail "gif count mismatch: staged $GIFS != expected union $EXPECT"
 
 log "OK"
 exit 0

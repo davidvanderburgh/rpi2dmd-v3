@@ -85,12 +85,24 @@ done
 [ -f "$SCRIPT_DIR/stage-media.sh" ] || fail "stage-media.sh missing"
 [ -f "$SCRIPT_DIR/firstboot/rpi2dmd-expand.sh" ] || fail "firstboot/rpi2dmd-expand.sh missing"
 
-DLC_GIF= BON_GIF=
+# Extra GIF sources, either of:
+#   content/gif-extra/<Category>/*.gif  — pre-merged tree assembled by the
+#                                         builder from user-supplied packs
+#   content/dlc10k + content/bonus      — legacy layout (both required)
+# Neither present (or --lite) = stock media-base gifs only.
+DLC_GIF= BON_GIF= GIF_EXTRA=
 if [ "$LITE" != 1 ]; then
-    DLC_GIF=$(find "$CONTENT/dlc10k" -maxdepth 4 -type d -iname gif 2>/dev/null | head -n 1)
-    [ -n "$DLC_GIF" ] || fail "dlc10k gif dir not found under $CONTENT/dlc10k (use --lite to skip)"
-    BON_GIF=$(find "$CONTENT/bonus" -maxdepth 4 -type d -iname gif 2>/dev/null | head -n 1)
-    [ -n "$BON_GIF" ] || fail "bonus gif dir not found under $CONTENT/bonus (use --lite to skip)"
+    if [ -d "$CONTENT/gif-extra" ]; then
+        GIF_EXTRA="$CONTENT/gif-extra"
+        log "extra gifs: builder-merged tree ($GIF_EXTRA)"
+    elif [ -d "$CONTENT/dlc10k" ] || [ -d "$CONTENT/bonus" ]; then
+        DLC_GIF=$(find "$CONTENT/dlc10k" -maxdepth 4 -type d -iname gif 2>/dev/null | head -n 1)
+        [ -n "$DLC_GIF" ] || fail "dlc10k gif dir not found under $CONTENT/dlc10k (use --lite to skip)"
+        BON_GIF=$(find "$CONTENT/bonus" -maxdepth 4 -type d -iname gif 2>/dev/null | head -n 1)
+        [ -n "$BON_GIF" ] || fail "bonus gif dir not found under $CONTENT/bonus (use --lite to skip)"
+    else
+        log "no extra gif packs staged: stock media-base gifs only"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -106,8 +118,11 @@ P3_SECTORS=$((TOTAL_SECTORS - P3_START))
 [ "$P3_SECTORS" -ge 262144 ] || fail "--size-gb $SIZE_GB too small: media partition would be <128 MiB"
 P3_BYTES=$((P3_SECTORS * 512))
 
+GIF_CACHE=
+[ -d "$CONTENT/gif-cache" ] && GIF_CACHE="$CONTENT/gif-cache"
 PAYLOAD=$(du -sb --total "$CONTENT/dmd" "$CONTENT/media-base/gif" \
           "$CONTENT/media-base/fonts" ${DLC_GIF:+"$DLC_GIF"} ${BON_GIF:+"$BON_GIF"} \
+          ${GIF_EXTRA:+"$GIF_EXTRA"} ${GIF_CACHE:+"$GIF_CACHE"} \
           2>/dev/null | tail -n 1 | cut -f1)
 MARGIN=$((256 * 1024 * 1024))   # FAT overhead + headroom
 if [ $((PAYLOAD + MARGIN)) -gt "$P3_BYTES" ]; then

@@ -1,0 +1,6 @@
+{
+  "id": "rundmd-b237",
+  "title": "Run-DMD SD image (B-series)",
+  "kind": "rundmd-image",
+  "match": ["b2*.zip", "b2*.img", "*rundmd*b*.img*", "*run-dmd*.img*"]
+}
