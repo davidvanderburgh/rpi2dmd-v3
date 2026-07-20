@@ -101,17 +101,27 @@ check("gif_scene frames render", out[0][0].size == (128, 32))
 check("frame budget counts RgfClip",
       scheduler._payload_frames(clip) == len(clip))
 
-# 6. bulk materialize: identical pixels to lazy iteration, RGB mode
+# 6. bulk materialize: StripFrames, identical pixels to lazy iteration
 mat = clip.materialize()
 check("materialize returns all frames", mat is not None and
       len(mat) == len(clip), mat and len(mat))
 lazy = list(clip)
-same = all(m[0].convert("RGB").tobytes() ==
+same = all(m[0].realize().tobytes() ==
            l[0].convert("RGB").tobytes() and m[1] == l[1]
            for m, l in zip(mat, lazy))
 check("materialized == lazy (pixels + durations)", same)
-check("materialized frames are RGB", mat[0][0].mode == "RGB",
-      mat[0][0].mode)
+check("materialized frames are RGB StripFrames",
+      mat[0][0].mode == "RGB" and hasattr(mat[0][0], "strip"),
+      type(mat[0][0]))
+check("all StripFrames share ONE strip image",
+      all(m[0].strip is mat[0][0].strip for m in mat))
+
+# 6b. drivers render StripFrames: sim driver realizes correctly
+from rpi2dmd import matrix  # noqa: E402
+sim = matrix.SimDriver(cfg, out_dir=os.environ["RPI2DMD_RUN"])
+sim.show(mat[1][0])
+check("SimDriver renders StripFrame",
+      sim.last_image.tobytes() == lazy[1][0].convert("RGB").tobytes())
 
 # 7. over-long clips refuse bulk materialization (stay lazy)
 old_max = rgf.MATERIALIZE_MAX_FRAMES

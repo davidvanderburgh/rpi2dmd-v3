@@ -29,6 +29,39 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 TARGET = (128, 32)
 MIN_FRAMES = 100
 
+# driver.show() costs ~33ms p50 / ~50ms p90 on the Pi Zero (the matrix
+# binding's SetImage walks every pixel even on its fast path), so holds
+# below ~66ms cannot be paced reliably — such clips stuttered. Clips whose
+# median hold is faster are retimed onto a uniform 66ms grid (15fps):
+# standard resampling, total duration preserved, frame chosen per tick.
+MIN_HOLD_MS = 66
+
+
+def retime_fast_clip(frames, min_hold=MIN_HOLD_MS):
+    """[(img, ms)] -> same clip resampled to uniform >=min_hold holds when
+    its median hold is below min_hold; unchanged otherwise."""
+    if not frames:
+        return frames
+    holds = sorted(d for _, d in frames)
+    if holds[len(holds) // 2] >= min_hold:
+        return frames
+    total = sum(d for _, d in frames)
+    starts = []
+    s = 0
+    for _, d in frames:
+        starts.append(s)
+        s += d
+    out = []
+    idx = 0
+    tick = 0
+    while tick < total:
+        while idx + 1 < len(frames) and starts[idx + 1] <= tick:
+            idx += 1
+        out.append([frames[idx][0], min_hold])
+        tick += min_hold
+    out[-1][1] = max(20, total - min_hold * (len(out) - 1))
+    return [(img, d) for img, d in out]
+
 
 def build_one(job):
     """(src, dst, force) -> (status, src, frames, src_b, out_b, err)."""
@@ -44,6 +77,7 @@ def build_one(job):
         if nf < MIN_FRAMES:
             return ("under_threshold", src, nf, 0, 0, "")
         frames = scenes._load_image_frames(src, target=TARGET)
+        frames = retime_fast_clip(frames)
         rgf.write_rgf(dst, frames, src_size=os.path.getsize(src))
         return ("built", src, len(frames), os.path.getsize(src),
                 os.path.getsize(dst), "")

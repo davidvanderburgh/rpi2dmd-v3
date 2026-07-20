@@ -189,8 +189,15 @@ class RgfClip(object):
             yield self.frame(i), self.durations[i]
 
     def materialize(self, pace_every=0, pace_s=0.0):
-        """-> list of (RGB Image, duration_ms) via bulk conversion, or
+        """-> list of (StripFrame, duration_ms) via bulk conversion, or
         None when this clip cannot be bulk-converted (v1, or too long).
+
+        Every PIL operation costs ~6-10ms on the Pi regardless of size,
+        so the result must involve ZERO per-frame PIL objects: the whole
+        clip becomes ONE realized RGB strip and each frame is a
+        StripFrame window into it that the driver blits with a single
+        clipped paste. (A crop-per-frame variant cost ~15s to build and
+        ~6ms per shown frame to realize — measured, stuttered.)
 
         pace_every/pace_s: voluntary sleeps between decompress batches so
         the worker never monopolizes the GIL for long.
@@ -211,9 +218,30 @@ class RgfClip(object):
         del parts
         strip.putpalette(self.palette)
         strip = strip.convert("RGB")   # ONE conversion for the whole clip
-        out = []
-        for i in range(n):
-            out.append((strip.crop((0, i * self.height, self.width,
-                                    (i + 1) * self.height)),
-                        self.durations[i]))
-        return out
+        strip.load()
+        return [(StripFrame(strip, i * self.height, self.width,
+                            self.height), self.durations[i])
+                for i in range(n)]
+
+
+class StripFrame(object):
+    """A window into a shared, realized RGB strip image — the zero-PIL-op
+    frame representation. Drivers blit it with one clipped paste
+    (paste(strip, (0, -y))); anything that needs a real PIL image calls
+    realize() (rare paths only: previews, GIF clock overlay)."""
+
+    __slots__ = ("strip", "y", "width", "height")
+    mode = "RGB"
+
+    def __init__(self, strip, y, width, height):
+        self.strip = strip
+        self.y = y
+        self.width = width
+        self.height = height
+
+    @property
+    def size(self):
+        return (self.width, self.height)
+
+    def realize(self):
+        return self.strip.crop((0, self.y, self.width, self.y + self.height))

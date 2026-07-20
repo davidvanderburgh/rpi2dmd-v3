@@ -115,11 +115,16 @@ class RgbMatrixDriver(BaseDriver):
         return Image.new("RGB", (self.width, self.height))
 
     def show(self, image):
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-        if image.size != (self.width, self.height):
-            image = image.resize((self.width, self.height))
-        self._scratch.paste(image, (0, 0))   # in place: address never moves
+        if getattr(image, "strip", None) is not None:
+            # StripFrame: one clipped paste straight from the shared
+            # realized strip — zero per-frame PIL objects (rgf.py)
+            self._scratch.paste(image.strip, (0, -image.y))
+        else:
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            if image.size != (self.width, self.height):
+                image = image.resize((self.width, self.height))
+            self._scratch.paste(image, (0, 0))  # in place: address stays
         try:
             if self._safe_path:
                 self._canvas.SetImage(self._scratch, 0, 0, False)
@@ -156,6 +161,8 @@ class SimDriver(BaseDriver):
             os.makedirs(out_dir)
 
     def show(self, image):
+        if getattr(image, "strip", None) is not None:
+            image = image.realize()
         if image.mode != "RGB":
             image = image.convert("RGB")
         self.last_image = image

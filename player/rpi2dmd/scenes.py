@@ -653,7 +653,9 @@ def gif_scene(cfg, path, canvas=CANVAS, frames=None, time_fn=None):
                 if overlay:
                     if time_fn is not None:
                         now_dt, to_change = _clock_beat(ck, time_fn)
-                    out = img.convert("RGB")   # copy; cached frames are "P"
+                    # copy for drawing; StripFrame realizes to a PIL image
+                    out = img.realize() if hasattr(img, "realize") \
+                        else img.convert("RGB")
                     _draw_clock_rgb(out, cfg, outline=True, now=now_dt)
                 if to_change is not None \
                         and MIN_FRAME_MS <= to_change <= left - MIN_FRAME_MS:
