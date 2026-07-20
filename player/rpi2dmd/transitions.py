@@ -55,21 +55,31 @@ def _transition_frames(img, kind, entering, steps=STEPS, step_ms=STEP_MS):
 
 
 def wrap(scene, mode, rng=None):
-    """Generator adapter adding enter/exit transitions around a scene."""
+    """Generator adapter adding enter/exit transitions around a scene.
+
+    Frames must be passed through the moment the scene yields them: scenes
+    time their content and holds off the wall clock at generation (the clock
+    lands its colon flip on the second boundary), so holding a frame back to
+    peek at the next one displays every frame one slot late and turns the
+    scheduler's deadline chain into an undamped oscillator — the colon
+    blink cycled 877/986/1137ms forever. Only the last *image* is kept
+    (for the exit transition), never an undisplayed frame.
+    """
     rng = rng or random
     enter, exit_ = _resolve(mode, rng)
     it = iter(scene)
     try:
-        prev = next(it)
+        first = next(it)
     except StopIteration:
         return
     if enter is not None:
-        for f in _transition_frames(prev[0], enter, True):
+        for f in _transition_frames(first[0], enter, True):
             yield f
+    yield first
+    last_img = first[0]
     for item in it:
-        yield prev
-        prev = item
-    yield prev
+        yield item
+        last_img = item[0]
     if exit_ is not None:
-        for f in _transition_frames(prev[0], exit_, False):
+        for f in _transition_frames(last_img, exit_, False):
             yield f

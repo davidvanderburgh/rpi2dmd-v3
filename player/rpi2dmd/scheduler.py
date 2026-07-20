@@ -21,19 +21,47 @@ import traceback
 
 from PIL import Image
 
-from . import paths, rda, scenes, transitions
+from . import paths, rda, rgf, scenes, transitions
 
 
 PREFETCH_DEPTH = 3          # decoded animations kept ahead of playback
 PREFETCH_PACE_EVERY = 8     # frames decoded between voluntary sleeps
 PREFETCH_PACE_S = 0.012     # the sleep: caps GIL bursts so the clock's
                             # render thread never waits behind a decode
+# One decode worker feeds playback, so a monster GIF (60s+ to decode on the
+# Pi's leftover ~25% of a core) stalls every animation behind it and the
+# panel shows only clock meanwhile. Bound each attempt; the offender is
+# skipped with a journal line naming it. Generous on purpose: pre-scaled
+# 128x32 library GIFs decode in ~1-2s.
+DECODE_BUDGET_S = 20.0
 # Memory ceiling for buffered-ahead frames. A 128x32 RGB frame is ~12KB, so
 # 2500 frames ~= 30MB. This is what actually bounds the queue: full-length
 # GIFs (up to ~5000 frames) are NOT truncated, they just reduce how many
 # animations we buffer ahead of them, so we never hold three huge clips at
 # once on a 512MB Pi.
 PREFETCH_FRAME_BUDGET = 2500
+
+
+def _cached_gif(category, filename, gif_path):
+    """RgfClip from the pre-decoded sidecar cache, or None.
+
+    One file read instead of ~100ms/frame of Pillow GIF decode on this
+    hardware. Guarded by source file size so a replaced .gif never plays
+    a stale cache. Used by the prefetcher AND the user-queued play path
+    (which never goes through the prefetcher).
+    """
+    cache = rgf.cache_path(category, filename)
+    if not os.path.exists(cache):
+        return None
+    try:
+        clip = rgf.RgfClip(cache)
+        if not clip.src_size or clip.src_size == os.path.getsize(gif_path):
+            return clip
+        sys.stderr.write("prefetch: stale cache ignored for %s/%s\n"
+                         % (category, filename))
+    except Exception:
+        traceback.print_exc()
+    return None
 
 
 def _payload_frames(payload):
@@ -157,9 +185,16 @@ class Prefetcher(object):
                     if i % (PREFETCH_PACE_EVERY * 2) == 0:
                         time.sleep(PREFETCH_PACE_S)
                 return (header, frames, indexes)
+            clip = _cached_gif(item[0], item[1], item[2])
+            if clip is not None:
+                return clip
             return scenes.load_gif_frames(
                 item[2], self.canvas,
-                pace_every=PREFETCH_PACE_EVERY, pace_s=PREFETCH_PACE_S)
+                pace_every=PREFETCH_PACE_EVERY, pace_s=PREFETCH_PACE_S,
+                abort_after_s=DECODE_BUDGET_S)
+        except scenes.DecodeBudgetExceeded as e:
+            sys.stderr.write("prefetch: skipping slow GIF (%s)\n" % (e,))
+            return None
         except Exception:
             traceback.print_exc()
             return None
@@ -275,9 +310,15 @@ class Scheduler(object):
             time.sleep(min(0.02, remaining))
 
     # -- frame pump ----------------------------------------------------------
-    def play_scene(self, scene, state_name, now_playing=None, log=None):
+    def play_scene(self, scene, state_name, now_playing=None, log=None,
+                   on_first_frame=None):
         """Drive one scene to the driver, honoring control flags.
-        Exceptions inside the scene are logged and swallowed."""
+        Exceptions inside the scene are logged and swallowed.
+
+        on_first_frame: called once, right after the first frame is shown.
+        The clock cycle uses it to start picking/prefetching the next
+        animation *after* the panel has switched — doing that work first
+        held the previous scene's dead frame on screen for seconds."""
         st = self.state
         self.scene_log.append(log or state_name)
         st.set_scene(state_name, now_playing)
@@ -302,6 +343,12 @@ class Scheduler(object):
                 self.frames_shown += 1
                 self._maybe_snapshot()
                 st.tick()
+                if on_first_frame is not None:
+                    hook, on_first_frame = on_first_frame, None
+                    try:
+                        hook()
+                    except Exception:
+                        traceback.print_exc()
                 if self.max_frames is not None \
                         and self.frames_shown >= self.max_frames:
                     st.request_stop()
@@ -553,15 +600,21 @@ class Scheduler(object):
               "started_at": time.time(), "duration_ms": duration}
         header, frames, indexes = (preloaded if preloaded
                                    else (None, None, None))
+        # real wall clock only: --fast paces on simulated time, where a
+        # beat-split would sample the real clock and break determinism
+        beat_fn = None if self.fast else time.time
         self.play_scene(scenes.dmd_scene(cfg, path, header=header,
                                          frames=frames, indexes=indexes,
-                                         canvas=self.canvas),
+                                         canvas=self.canvas,
+                                         time_fn=beat_fn),
                         "animation", np, log=("dmd", game, name))
         if show == "after" and not self.state.stop_requested:
             self._play_name_card(title)
 
     def _play_gif(self, category, filename, path, preloaded=None):
         cfg = self.cfg
+        if preloaded is None and not self.fast:
+            preloaded = _cached_gif(category, filename, path)
         show = cfg.get("playback.show_name", "hide")
         title = os.path.splitext(filename)[0].replace("_", " ")
         if show == "before":
@@ -571,7 +624,9 @@ class Scheduler(object):
         np = {"type": "gif", "game": category, "name": filename,
               "started_at": time.time(), "duration_ms": 0}
         self.play_scene(scenes.gif_scene(cfg, path, canvas=self.canvas,
-                                         frames=preloaded),
+                                         frames=preloaded,
+                                         time_fn=None if self.fast
+                                         else time.time),
                         "animation", np, log=("gif", category, filename))
         if show == "after" and not self.state.stop_requested:
             self._play_name_card(title)
@@ -591,7 +646,8 @@ class Scheduler(object):
                 self._play_gif(parts[0], parts[1], path)
 
     # -- scene slots ----------------------------------------------------------
-    def _play_clock_cycle(self, gap_seconds, extend_while=None):
+    def _play_clock_cycle(self, gap_seconds, extend_while=None,
+                          on_first_frame=None):
         cfg = self.cfg
         if cfg.get("clock.enabled", True):
             if gap_seconds is not None:
@@ -606,12 +662,12 @@ class Scheduler(object):
                                   self.rng)
             np = {"type": "clock", "game": "", "name": "clock",
                   "started_at": time.time(), "duration_ms": dwell}
-            self.play_scene(sc, "clock", np)
+            self.play_scene(sc, "clock", np, on_first_frame=on_first_frame)
         else:
             dwell = int(gap_seconds * 1000) if gap_seconds is not None \
                 else 1000
             self.play_scene(_blank_scene(self.canvas, dwell), "clock",
-                            log="blank")
+                            log="blank", on_first_frame=on_first_frame)
 
     def _interleaves(self):
         cfg = self.cfg
@@ -740,26 +796,39 @@ class Scheduler(object):
         # animation is seamless. If the head of the queue is still decoding
         # when the clock's dwell ends, the clock simply keeps showing (via
         # extend_while) — the panel must never wait on a black screen.
+        # Picking + prefetch start only AFTER the first clock frame is on
+        # the panel (on_first_frame): building the pick lists and starting
+        # the decode before it held the dead last animation frame on
+        # screen for seconds.
         picked = None
         extend = None
+        kickoff = None
         if gap is not None:
             if self.fast:
                 # tests: pick one, decode synchronously below — no threads,
                 # no wall-clock waits, fully deterministic
                 picked = self._pick_animation()
             else:
-                while len(self._upcoming) < self.prefetch.depth:
-                    nxt = self._pick_animation()
-                    if nxt is None or nxt in self._upcoming:
-                        break
-                    self._upcoming.append(nxt)
-                if self._upcoming:
-                    picked = self._upcoming[0]
-                    self.prefetch.ensure(self._upcoming)
-                    pf, pk = self.prefetch, picked
-                    extend = lambda: not pf.ready(pk)  # noqa: E731
+                def kickoff():
+                    while len(self._upcoming) < self.prefetch.depth:
+                        nxt = self._pick_animation()
+                        if nxt is None or nxt in self._upcoming:
+                            break
+                        self._upcoming.append(nxt)
+                    if self._upcoming:
+                        self.prefetch.ensure(self._upcoming)
 
-        self._play_clock_cycle(gap, extend_while=extend)
+                def extend():
+                    # extend only while NOTHING queued is ready — a failed
+                    # or budget-skipped decode counts as ready (payload
+                    # None), so a monster GIF can never pin the clock past
+                    # its decode budget
+                    ups = self._upcoming
+                    return bool(ups) and not any(
+                        self.prefetch.ready(p) for p in ups)
+
+        self._play_clock_cycle(gap, extend_while=extend,
+                               on_first_frame=kickoff)
         if st.stop_requested:
             return
         self._cycle += 1
@@ -773,17 +842,31 @@ class Scheduler(object):
             st.take_skip()
             self._play_queued(queued)
             return
+        if picked is None and not self.fast and self._upcoming:
+            # play the first READY item; strict head order would wait on a
+            # slow decode while a finished one sits behind it
+            for i, p in enumerate(self._upcoming):
+                if self.prefetch.ready(p):
+                    picked = self._upcoming.pop(i)
+                    break
+            else:
+                picked = self._upcoming.pop(0)
         if picked is None:
             return
-        if self._upcoming and self._upcoming[0] == picked:
-            self._upcoming.pop(0)
         kind, item = picked
         if self.fast:
             preloaded = None            # deterministic sync load in the scene
         else:
             # after the extend gate this is normally instant; the short
-            # timeout only covers the extend-cap case (scene loads sync then)
+            # timeout only covers the extend-cap case
             preloaded = self.prefetch.take(picked, timeout=1.0)
+            if kind == "gif" and preloaded is None:
+                # failed or budget-skipped decode: loading it synchronously
+                # in the scene froze the panel for its whole decode (45s
+                # measured). Skip it; the clock plays this slot instead.
+                sys.stderr.write("scheduler: skipping %s/%s (no decoded "
+                                 "frames)\n" % (item[0], item[1]))
+                return
         if kind == "dmd":
             self._play_dmd(item[0], item[1], item[2], preloaded=preloaded)
         else:

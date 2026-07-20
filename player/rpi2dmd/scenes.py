@@ -177,8 +177,12 @@ Image.MAX_IMAGE_PIXELS = 32 * 1024 * 1024
 MAX_GIF_FRAMES = 8000
 
 
+class DecodeBudgetExceeded(Exception):
+    """A decode outran its wall-time budget (prefetch skips the file)."""
+
+
 def _load_image_frames(path, target=None, max_frames=None,
-                       pace_every=0, pace_s=0.0):
+                       pace_every=0, pace_s=0.0, abort_after_s=0.0):
     """Load a (possibly animated) image -> list of (RGB image, duration_ms).
 
     Frames are composited over the previous frame so partial/transparent
@@ -189,12 +193,23 @@ def _load_image_frames(path, target=None, max_frames=None,
     pace_every/pace_s: voluntary sleep every N decoded frames — used by the
     prefetcher so a long decode never monopolizes the GIL while the clock's
     render thread is trying to hit its second boundary.
+
+    abort_after_s: raise DecodeBudgetExceeded once the decode has run this
+    long (0 = no budget). A monster GIF can take a minute+ on the Pi; with
+    a single decode worker that stalls every animation behind it, so the
+    prefetcher bounds each attempt and moves on.
     """
     limit = max_frames or MAX_GIF_FRAMES
+    t0 = time.time()
     img = Image.open(path)
     frames = []
     base = None
     for frame in ImageSequence.Iterator(img):
+        if abort_after_s and time.time() - t0 > abort_after_s:
+            raise DecodeBudgetExceeded(
+                "%s: %d frames decoded in %.1fs, budget %.0fs"
+                % (os.path.basename(path), len(frames),
+                   time.time() - t0, abort_after_s))
         dur = frame.info.get("duration", GIF_DEFAULT_FRAME_MS)
         try:
             dur = max(MIN_FRAME_MS, int(dur))
@@ -341,7 +356,7 @@ def _clock_overlay(ck, w, h, tint, gamma, now=None):
 
 
 def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None,
-                time_fn=None, extend_while=None, extend_cap_ms=15000):
+                time_fn=None, extend_while=None, extend_cap_ms=120000):
     """Standalone clock for dwell_ms.
 
     The text layer is rebuilt only when the displayed time actually changes
@@ -353,7 +368,11 @@ def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None,
     time_fn: the scheduler's clock (simulated under --fast).
     extend_while: keep showing the clock past dwell while this returns True
     (the scheduler uses it to wait for the next animation's prefetch, so the
-    panel never goes black between clock and animation).
+    panel never goes black between clock and animation). The cap is a
+    safety net against a wedged prefetch, set high on purpose: a huge GIF
+    can legitimately take a minute to decode on the Pi, and a ticking
+    clock beats a frozen panel for the whole of it (measured 45s frozen
+    with the old 15s cap when the scene fell back to a synchronous load).
     """
     rng = rng or random
     time_fn = time_fn or time.time
@@ -385,7 +404,13 @@ def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None,
             if extend_while is None or extended >= extend_cap_ms \
                     or not extend_while():
                 break
-        now_dt = datetime.datetime.now()
+        # Frames are aimed at second boundaries, but wake lag can put
+        # generation a hair *before* the boundary the frame will display
+        # on — sampling the clock right here then showed a stale beat
+        # (skipped flip + 20ms double-blink). Sample one MIN_FRAME ahead
+        # so a near-boundary frame carries the upcoming second's state.
+        now_dt = datetime.datetime.now() \
+            + datetime.timedelta(milliseconds=MIN_FRAME_MS)
         text, suffix = clock.time_text(ck, now_dt)
         colon = clock.colon_visible(ck, now_dt)
         key = (text, suffix, colon)
@@ -435,6 +460,23 @@ def clock_still(cfg, canvas=CANVAS):
 # DMD animation scene
 # ---------------------------------------------------------------------------
 
+def _clock_beat(ck, time_fn):
+    """-> (now_dt, to_change_ms): the clock state to render right now and
+    the milliseconds until that state next changes.
+
+    Sampled one MIN_FRAME ahead (same guard as clock_scene) so a frame
+    generated a hair before a boundary carries the state it will actually
+    display in. The state changes every second while the colon blinks (or
+    seconds are shown), else at the minute rollover.
+    """
+    t = time_fn() + MIN_FRAME_MS / 1000.0
+    per_second = ck.get("colon", "blink") == "blink" \
+        or "sec" in str(ck.get("format", "12h"))
+    step = 1.0 if per_second else 60.0
+    to_change = int((step - (t % step)) * 1000) + 1
+    return datetime.datetime.fromtimestamp(t), to_change
+
+
 def _resolve_overlay(cfg, header):
     """-> (mode, size_hint, override_xy, start, end) for the clock overlay.
     mode is 'front', 'back' or None."""
@@ -482,16 +524,24 @@ def _name_overlay(text, w, h):
 
 
 def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS,
-              indexes=None):
+              indexes=None, time_fn=None):
     """Play an RDA animation honoring per-frame durations and the clock
     overlay rules (playback.clock_overlay / per-animation metadata).
 
     indexes: optional pre-unpacked frames (the prefetcher supplies these so
     the render loop does not pay for nibble expansion per frame).
+
+    time_fn: wall clock for landing the overlay clock's colon flip on the
+    second even inside a long animation frame — the frame's hold is split
+    at the beat and the overlay recomposited (total duration unchanged, so
+    animation pacing is untouched). None (tests, --fast) = never split;
+    library-wide the flip would otherwise run ~109ms late on average and
+    can miss a whole beat on long holds (max 2200ms).
     """
     if header is None or frames is None:
         header, frames = rda.read_rda(rda_path)
     w, h = canvas
+    ck = cfg["clock"]
     tint, gamma = _display(cfg, game=header.get("game"))
     palette = rda.build_palette(tint, gamma)
     mode, size_hint, override_xy, start, end = _resolve_overlay(cfg, header)
@@ -504,22 +554,39 @@ def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS,
 
     durations = header.get("durations", [])
     for i, packed in enumerate(frames):
-        idx = indexes[i] if indexes is not None else rda.unpack_frame(packed)
-        if mode is not None and start <= i <= end:
-            grid, _ = clock.render_indexed(
-                cfg["clock"], rda.WIDTH, rda.HEIGHT,
-                size_hint=size_hint, override_xy=override_xy)
-            idx = clock.composite_clock_indexed(
-                idx, grid, mode, outline=(outline and mode == "front"))
-        img = Image.frombytes("P", (rda.WIDTH, rda.HEIGHT), idx)
-        img.putpalette(palette)
-        img = img.convert("RGB")
-        if (rda.WIDTH, rda.HEIGHT) != (w, h):
-            img = img.resize((w, h), Image.NEAREST)
-        if name_layer is not None:
-            img.paste(name_layer, (0, 0), name_layer)
+        base = indexes[i] if indexes is not None else rda.unpack_frame(packed)
         dur = durations[i] if i < len(durations) else GIF_DEFAULT_FRAME_MS
-        yield img, max(MIN_FRAME_MS, int(dur))
+        left = max(MIN_FRAME_MS, int(dur))
+        overlay = mode is not None and start <= i <= end
+        while True:
+            now_dt = to_change = None
+            if overlay and time_fn is not None:
+                now_dt, to_change = _clock_beat(ck, time_fn)
+            idx = base
+            if overlay:
+                # composite copies `base`; each segment must start from the
+                # pristine frame — 'back' mode fills black pixels and
+                # 'front' burns an outline, so recompositing over the
+                # previous segment's output would bake in the old colon
+                grid, _ = clock.render_indexed(
+                    ck, rda.WIDTH, rda.HEIGHT, now=now_dt,
+                    size_hint=size_hint, override_xy=override_xy)
+                idx = clock.composite_clock_indexed(
+                    idx, grid, mode, outline=(outline and mode == "front"))
+            img = Image.frombytes("P", (rda.WIDTH, rda.HEIGHT), idx)
+            img.putpalette(palette)
+            img = img.convert("RGB")
+            if (rda.WIDTH, rda.HEIGHT) != (w, h):
+                img = img.resize((w, h), Image.NEAREST)
+            if name_layer is not None:
+                img.paste(name_layer, (0, 0), name_layer)
+            if to_change is not None \
+                    and MIN_FRAME_MS <= to_change <= left - MIN_FRAME_MS:
+                yield img, to_change
+                left -= to_change
+                continue
+            yield img, left
+            break
 
 
 # ---------------------------------------------------------------------------
@@ -527,35 +594,56 @@ def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS,
 # ---------------------------------------------------------------------------
 
 def load_gif_frames(path, canvas=CANVAS, max_frames=None,
-                    pace_every=0, pace_s=0.0):
+                    pace_every=0, pace_s=0.0, abort_after_s=0.0):
     """Decode a GIF to canvas-sized frames. Slow on a Pi (big GIFs take
     seconds), so the scheduler prefetches this off the critical path."""
     if max_frames is None:
         max_frames = PLAYBACK_MAX_GIF_FRAMES
     return _load_image_frames(path, target=canvas, max_frames=max_frames,
-                              pace_every=pace_every, pace_s=pace_s)
+                              pace_every=pace_every, pace_s=pace_s,
+                              abort_after_s=abort_after_s)
 
 
-def gif_scene(cfg, path, canvas=CANVAS, frames=None):
+def gif_scene(cfg, path, canvas=CANVAS, frames=None, time_fn=None):
     """Play a GIF file: per-frame durations, cover-scale to the canvas,
-    single pass (looped until >= 1.5s total), optional clock overlay."""
+    single pass (looped until >= 1.5s total), optional clock overlay.
+
+    time_fn: as in dmd_scene — lands the overlay clock's colon flip on the
+    beat by splitting a frame's hold (GIF holds are unbounded, so without
+    this a long hold freezes the colon for its whole duration)."""
     w, h = canvas
     if frames is None:
         frames = _load_image_frames(path, target=(w, h),
                                     max_frames=PLAYBACK_MAX_GIF_FRAMES)
-    total = sum(dur for _, dur in frames)
+    # RgfClip exposes total_ms so we never decompress the whole clip just
+    # to sum durations; plain frame lists are summed as before
+    total = getattr(frames, "total_ms", None)
+    if total is None:
+        total = sum(dur for _, dur in frames)
     passes = 1
     if total > 0:
         while total * passes < GIF_MIN_TOTAL_MS:
             passes += 1
     overlay = bool(cfg.get("playback.gif_clock_overlay", False))
+    ck = cfg["clock"]
     for _ in range(passes):
         for img, dur in frames:
-            out = img
-            if overlay:
-                out = img.copy()
-                _draw_clock_rgb(out, cfg, outline=True)
-            yield out, dur
+            left = dur
+            while True:
+                out = img
+                now_dt = to_change = None
+                if overlay:
+                    if time_fn is not None:
+                        now_dt, to_change = _clock_beat(ck, time_fn)
+                    out = img.convert("RGB")   # copy; cached frames are "P"
+                    _draw_clock_rgb(out, cfg, outline=True, now=now_dt)
+                if to_change is not None \
+                        and MIN_FRAME_MS <= to_change <= left - MIN_FRAME_MS:
+                    yield out, to_change
+                    left -= to_change
+                    continue
+                yield out, left
+                break
 
 
 # ---------------------------------------------------------------------------

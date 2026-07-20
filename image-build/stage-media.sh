@@ -46,6 +46,16 @@ else
     log "lite build: skipping dlc10k + bonus packs"
 fi
 
+# Pre-decoded GIF cache (tools/build_gif_cache.py output). Optional: the
+# player falls back to on-device GIF decode without it, but that costs
+# ~100ms/frame on a Pi Zero, so ship it when staged.
+if [ -d "$CONTENT/gif-cache" ]; then
+    log "gif-cache/ <- pre-decoded RGF cache"
+    RS "$CONTENT/gif-cache/" "$P3/gif-cache/" || fail "gif-cache copy failed"
+else
+    log "no gif-cache staged (player will decode GIFs on device)"
+fi
+
 log "dmd/ <- RDA library"
 RS "$CONTENT/dmd/" "$P3/dmd/" || fail "dmd copy failed"
 
@@ -102,6 +112,8 @@ Configuration
 Content on this partition
 -------------------------
   gif\<Category>\*.gif   GIF library (v2 stock + ULTIMATE 10K DLC + bonus)
+  gif-cache\             pre-decoded GIF cache (auto-used; safe to delete —
+                         playback of long GIFs just gets much slower)
   dmd\<GAME>\*.rda       Run-DMD animation library (2,379 animations)
   fonts\                 clock fonts, patterns and background images
   config\                this folder

@@ -31,6 +31,11 @@ class Library(object):
         self._index = {}
         self._index_mtime = None
         self._gifs = {}
+        # Building the enabled-items list walks every animation/GIF (10k+
+        # items) in pure Python — ~1-3s per pick on the Pi Zero, which
+        # showed as the panel hanging on the last animation frame before
+        # every clock. Cache per flag-state; treat results as read-only.
+        self._enabled_cache = {}
         self.refresh()
 
     # -- loading ----------------------------------------------------------
@@ -38,6 +43,7 @@ class Library(object):
         """Re-read index.json (if changed) and rescan the GIF categories."""
         self._load_index()
         self._scan_gifs()
+        self._enabled_cache.clear()
         return self
 
     def _index_path(self):
@@ -60,6 +66,7 @@ class Library(object):
         except (ValueError, OSError):
             self._index = {}
             self._index_mtime = None
+        self._enabled_cache.clear()   # index changed under us
 
     def _scan_gifs(self):
         root = paths.gif_dir()
@@ -105,9 +112,18 @@ class Library(object):
         return bool(flags.get(category, True))
 
     def enabled_dmd(self, cfg, ignore_flags=False):
-        """-> list of (game, name, relative file) tuples."""
+        """-> list of (game, name, relative file) tuples. Cached — treat as
+        read-only."""
+        games = self.games()   # may reload the index and clear the cache
+        flags = cfg.get("dmd.games", {}) or {}
+        disabled = cfg.get("dmd.disabled_animations", []) or []
+        key = ("dmd", ignore_flags, tuple(sorted(flags.items())),
+               tuple(sorted(disabled)))
+        hit = self._enabled_cache.get(key)
+        if hit is not None:
+            return hit
         out = []
-        for game, anims in self.games().items():
+        for game, anims in games.items():
             if not ignore_flags and not self.game_enabled(cfg, game):
                 continue
             for entry in anims:
@@ -115,16 +131,24 @@ class Library(object):
                 if not ignore_flags and not self.anim_enabled(cfg, name):
                     continue
                 out.append((game, name, entry.get("file", "")))
+        self._enabled_cache[key] = out
         return out
 
     def enabled_gifs(self, cfg, ignore_flags=False):
-        """-> list of (category, filename) tuples."""
+        """-> list of (category, filename) tuples. Cached — treat as
+        read-only."""
+        flags = cfg.get("gif.categories", {}) or {}
+        key = ("gif", ignore_flags, tuple(sorted(flags.items())))
+        hit = self._enabled_cache.get(key)
+        if hit is not None:
+            return hit
         out = []
         for cat, files in self._gifs.items():
             if not ignore_flags and not self.category_enabled(cfg, cat):
                 continue
             for f in files:
                 out.append((cat, f))
+        self._enabled_cache[key] = out
         return out
 
     # -- status counts ----------------------------------------------------

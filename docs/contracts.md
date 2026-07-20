@@ -13,6 +13,13 @@ must work fully offline (no CDN links).
 /opt/RPI2DMD/                     v2 binaries, kept but not autostarted
 /media/usb/dmd/                   RDA library: <GAME>/<NAME>.rda + index.json
 /media/usb/gif/<Category>/*.gif   GIF library (v2 + DLC)
+/media/usb/gif-cache/<Category>/<file>.gif.rgf
+                                  pre-decoded frame cache (rpi2dmd/rgf.py;
+                                  built on a PC by tools/build_gif_cache.py;
+                                  optional — player falls back to on-device
+                                  GIF decode, ~100ms/frame on the Zero, with
+                                  a 20s budget + skip; stale-guarded by the
+                                  source .gif's byte size)
 /media/usb/fonts/                 TTF fonts, patterns, Background_*.gif
 /media/usb/config/rpi2dmd.json    the ONLY v3 config document
 /media/usb/config/config.txt      v2 legacy (wifi bootstrap + migration)

@@ -126,9 +126,12 @@ def render_indexed(cfg_clock, canvas_w=128, canvas_h=32, now=None,
     if cfg_clock.get("style") == "ttf":
         # Honor the chosen TTF here too, so the clock drawn over animations
         # matches the standalone clock scene instead of silently falling
-        # back to the pixel digits.
-        grid, bbox = _render_ttf_indexed(cfg_clock, canvas_w, canvas_h, text,
-                                         suffix, level, override_xy)
+        # back to the pixel digits. TTF has no colon-off glyph variant, so
+        # blink by blanking the colon (same as render_scene's TTF path).
+        ttf_text = text if colon_on else text.replace(":", " ")
+        grid, bbox = _render_ttf_indexed(cfg_clock, canvas_w, canvas_h,
+                                         ttf_text, suffix, level,
+                                         override_xy)
     else:
         font = _bitmap_font(cfg_clock, size_hint, colon_on)
         tw, th = font.measure(text)
@@ -252,23 +255,41 @@ def composite_clock_indexed(anim_indexes, grid, mode, outline=False):
 # Standalone clock scene (RGB)
 # ---------------------------------------------------------------------------
 
+# Re-opening and re-parsing the TTF on every render costs 50-150ms on the
+# Pi — a visibly late colon flip whenever the grid cache misses (twice per
+# minute). Font objects are immutable here, so cache them. (A font file
+# replaced in place under the same name needs a player restart to show.)
+_ttf_cache = {}
+
+
 def _load_ttf(cfg_clock, fonts_dir):
     from PIL import ImageFont
     name = cfg_clock.get("font", "") or ""
     size = int(cfg_clock.get("font_size", 20))
+    key = (name, size, fonts_dir)
+    hit = _ttf_cache.get(key)
+    if hit is not None:
+        return hit
     candidates = []
     if name:
         candidates.append(os.path.join(fonts_dir, name))
         candidates.append(os.path.join(fonts_dir, "Polices", name))
     candidates.append("/opt/RPI2DMD/arial.ttf")
     candidates.append("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+    font = None
     for c in candidates:
         if os.path.exists(c):
             try:
-                return ImageFont.truetype(c, size)
+                font = ImageFont.truetype(c, size)
+                break
             except OSError:
                 continue
-    return ImageFont.load_default()
+    if font is None:
+        font = ImageFont.load_default()
+    if len(_ttf_cache) >= 8:
+        _ttf_cache.clear()
+    _ttf_cache[key] = font
+    return font
 
 
 def _text_color(cfg_clock, tint, gamma):
