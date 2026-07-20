@@ -43,7 +43,8 @@ got = [pf.take(p, timeout=0.2) for p in picks[:4]]
 check("takes are instant when prefetched", time.time() - t0 < 0.5)
 check("payloads real", all(g is not None for g in got))
 kinds_ok = (isinstance(got[0], list)         # gif -> frame list
-            and isinstance(got[-1], tuple) and len(got[-1]) == 3)  # dmd
+            and isinstance(got[-1], tuple)
+            and len(got[-1]) == 4)  # dmd: (header, frames, indexes, strips)
 check("payload shapes per kind", kinds_ok,
       [type(g).__name__ for g in got])
 

@@ -12,6 +12,7 @@ Python 3.7 compatible.
 
 import collections
 import datetime
+import json
 import os
 import random
 import sys
@@ -89,9 +90,11 @@ class Prefetcher(object):
     something that will never arrive.
     """
 
-    def __init__(self, canvas, depth=PREFETCH_DEPTH):
+    def __init__(self, canvas, depth=PREFETCH_DEPTH, cfg=None):
         self.canvas = canvas
         self.depth = depth
+        self.cfg = cfg     # for worker-side DMD strip pre-render; a config
+                           # change flushes the queue, so no stale tints
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
         self._pending = []                       # picks to decode, in order
@@ -155,7 +158,10 @@ class Prefetcher(object):
 
     def _run(self):
         try:
-            os.nice(5)
+            # nice affects only the GIL-released C sections (zlib, PIL
+            # convert, GIF decode) — but after the nogil blit patch those
+            # are exactly where contention with the render thread lives
+            os.nice(10)
         except (OSError, AttributeError):
             pass
         while True:
@@ -184,7 +190,13 @@ class Prefetcher(object):
                     indexes.append(rda.unpack_frame(f))
                     if i % (PREFETCH_PACE_EVERY * 2) == 0:
                         time.sleep(PREFETCH_PACE_S)
-                return (header, frames, indexes)
+                prep = None
+                if self.cfg is not None:
+                    # pre-render frames to blit-ready strips + transparency
+                    # masks for ClockBehind (see materialize_dmd)
+                    prep = scenes.materialize_dmd(
+                        self.cfg, header, indexes, pace_s=PREFETCH_PACE_S)
+                return (header, frames, indexes, prep)
             clip = _cached_gif(item[0], item[1], item[2])
             if clip is not None:
                 # Bulk-materialize to ready RGB frames here in the worker:
@@ -213,11 +225,93 @@ def _safe_int(value, default):
     except (TypeError, ValueError):
         return default
 
+
+# Frame-timing journal: one JSON line per scene run in
+# <run_dir>/frametime.jsonl (tmpfs). Exists to NAME the content that
+# stutters instead of guessing: "late" is how far behind its absolute
+# deadline each frame was shown, "show" is what driver.show() cost, and
+# resyncs are the MAX_LAG give-ups the eye perceives as a stutter.
+FRAMETIME_LOG = "frametime.jsonl"
+FRAMETIME_MAX_BYTES = 1 << 20     # rotate to .1 past this; tmpfs stays small
+
+
+class _FrameStats(object):
+    """Per-scene-run timing collector; emit() writes one JSON line."""
+
+    __slots__ = ("scene", "ident", "t_start", "planned_ms", "lates",
+                 "shows", "resyncs", "resync_worst", "dropped", "_t0")
+
+    def __init__(self, scene, ident):
+        if isinstance(ident, tuple):
+            ident = ":".join(str(p) for p in ident)
+        self.scene = scene
+        self.ident = str(ident or scene)
+        self.t_start = time.time()
+        self.planned_ms = 0
+        self.lates = []          # ms behind deadline, one per shown frame
+        self.shows = []          # ms spent inside driver.show()
+        self.resyncs = 0
+        self.resync_worst = 0
+        self.dropped = 0         # frames skipped because their window passed
+        self._t0 = 0.0
+
+    def pre_show(self, late_s, hold_ms):
+        self.lates.append(int(late_s * 1000))
+        self.planned_ms += int(hold_ms)
+        self._t0 = time.time()
+
+    def post_show(self):
+        self.shows.append(int((time.time() - self._t0) * 1000))
+
+    def resync(self, lag_ms):
+        self.resyncs += 1
+        if lag_ms > self.resync_worst:
+            self.resync_worst = int(lag_ms)
+
+    def emit(self):
+        n = len(self.lates)
+        if n == 0:
+            return
+        lat = sorted(self.lates)
+        shows = sorted(self.shows) or [0]
+        doc = {
+            "ts": round(self.t_start, 3),
+            "scene": self.scene,
+            "id": self.ident,
+            "frames": n,
+            "planned_ms": self.planned_ms,
+            "wall_ms": int((time.time() - self.t_start) * 1000),
+            "late_p50": lat[n // 2],
+            "late_p95": lat[min(n - 1, (n * 95) // 100)],
+            "late_max": lat[-1],
+            "late_n40": sum(1 for v in lat if v > 40),
+            "show_p50": shows[len(shows) // 2],
+            "show_max": shows[-1],
+            "resyncs": self.resyncs,
+            "resync_max": self.resync_worst,
+            "dropped": self.dropped,
+        }
+        path = os.path.join(paths.run_dir(), FRAMETIME_LOG)
+        try:
+            if os.path.exists(path) \
+                    and os.path.getsize(path) > FRAMETIME_MAX_BYTES:
+                os.replace(path, path + ".1")
+            with open(path, "a") as f:
+                f.write(json.dumps(doc, separators=(",", ":")) + "\n")
+        except OSError:
+            pass
+
 MESSAGE_FREQ_S = {"1s": 1, "5s": 5, "15s": 15, "30s": 30, "1m": 60, "5m": 300}
 WEATHER_SHOW_INTERVAL_S = 3600
 SNAPSHOT_INTERVAL_S = 2.0
 MIN_FRAME_S = 0.02        # never pace faster than 50fps
 MAX_LAG_S = 0.25          # beyond this we resync rather than catch up
+# When a frame's whole display window has already passed, drop it instead
+# of showing it late: at 128x32 a dropped animation frame is invisible,
+# while the slow-motion crawl into a MAX_LAG resync jump was exactly the
+# stutter the eye catches. Bounded so the panel always makes visible
+# progress even when we are hopelessly behind.
+MAX_FRAME_DROPS = 3
 NICE_NORMAL = -5          # display first: hit frame deadlines
 NICE_WEB_ACTIVE = 15      # someone is using the web UI: get out of its way
 
@@ -285,7 +379,7 @@ class Scheduler(object):
         self._last_weather = 0.0
         self._cycle = 0
         self._backgrounds = scenes.scan_backgrounds()
-        self.prefetch = Prefetcher(self.canvas)
+        self.prefetch = Prefetcher(self.canvas, cfg=cfg)
         self._upcoming = []       # picks queued ahead of playback
         self._ui_checked_at = 0.0
         self._ui_active = False
@@ -333,6 +427,9 @@ class Scheduler(object):
         # the time spent decoding/compositing the next one, so every frame ran
         # long by a varying amount — animations played slow and stuttered.
         deadline = self._now()
+        stats = None if self.fast else _FrameStats(state_name, log)
+        drops = 0
+        shown_any = False
         try:
             for img, hold in scene:
                 if st.stop_requested:
@@ -345,8 +442,26 @@ class Scheduler(object):
                     if not self._pause_gate(state_name):
                         break
                     deadline = self._now()   # resync after a pause
+                if shown_any and not self.fast \
+                        and (self._now() - deadline) * 1000.0 >= hold \
+                        and drops < MAX_FRAME_DROPS:
+                    # the frame's whole display window is already in the
+                    # past: drop it and stay on the beat (bounded; never
+                    # the first frame — its lateness is scene startup
+                    # cost, and a one-frame scene must still show)
+                    drops += 1
+                    if stats is not None:
+                        stats.dropped += 1
+                    deadline += max(MIN_FRAME_S, hold / 1000.0)
+                    continue
+                drops = 0
+                shown_any = True
                 self._apply_brightness()
+                if stats is not None:
+                    stats.pre_show(self._now() - deadline, hold)
                 self.driver.show(img)
+                if stats is not None:
+                    stats.post_show()
                 self.frames_shown += 1
                 self._maybe_snapshot()
                 st.tick()
@@ -368,6 +483,8 @@ class Scheduler(object):
                 if deadline < now - MAX_LAG_S:
                     # Too far behind (a big GIF, a config reload): resync
                     # instead of sprinting through frames to catch up.
+                    if stats is not None:
+                        stats.resync((now - deadline) * 1000.0)
                     deadline = now
                 else:
                     self._sleep_until(deadline)
@@ -378,6 +495,8 @@ class Scheduler(object):
             # consume a skip that landed at the very end of the scene so it
             # cannot leak into (and instantly cancel) the next scene
             st.take_skip()
+            if stats is not None:
+                stats.emit()
 
     def _pause_gate(self, resume_state):
         """Blank the panel and hold while paused. -> False if stopping."""
@@ -605,15 +724,20 @@ class Scheduler(object):
         duration = found[0].get("duration_ms", 0) if found else 0
         np = {"type": "dmd", "game": game, "name": name,
               "started_at": time.time(), "duration_ms": duration}
-        header, frames, indexes = (preloaded if preloaded
-                                   else (None, None, None))
+        header = frames = indexes = strips = masks = None
+        if preloaded:
+            header, frames, indexes = preloaded[:3]
+            prep = preloaded[3] if len(preloaded) > 3 else None
+            if prep is not None:
+                strips, masks = prep
         # real wall clock only: --fast paces on simulated time, where a
         # beat-split would sample the real clock and break determinism
         beat_fn = None if self.fast else time.time
         self.play_scene(scenes.dmd_scene(cfg, path, header=header,
                                          frames=frames, indexes=indexes,
                                          canvas=self.canvas,
-                                         time_fn=beat_fn),
+                                         time_fn=beat_fn, strips=strips,
+                                         masks=masks),
                         "animation", np, log=("dmd", game, name))
         if show == "after" and not self.state.stop_requested:
             self._play_name_card(title)

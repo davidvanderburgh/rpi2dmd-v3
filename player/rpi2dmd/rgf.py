@@ -210,10 +210,12 @@ class RgfClip(object):
         # Slabs, not one giant strip: a whole-clip convert is a single C
         # call that holds the GIL ~1-2s under load — the render thread
         # missed frames whenever the worker prepared the NEXT clip
-        # (measured +4.6s stretch on a 90s clip). 32-frame slabs bound
-        # every hold to tens of ms; frames reference their slab directly.
+        # (measured +4.6s stretch on a 90s clip). 16-frame slabs bound
+        # every hold to ~10-20ms (was 32; halved after the frametime
+        # journal showed decode-coincident clock spikes); frames
+        # reference their slab directly.
         n = len(self)
-        slab_frames = 32
+        slab_frames = 16
         out = []
         for s0 in range(0, n, slab_frames):
             s1 = min(s0 + slab_frames, n)

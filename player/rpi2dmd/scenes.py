@@ -18,9 +18,10 @@ import subprocess
 import sys
 import time
 
-from PIL import Image, ImageDraw, ImageFont, ImageSequence
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageSequence
 
 from . import clock, paths, rda
+from .rgf import StripFrame
 
 CANVAS = (128, 32)
 MIN_FRAME_MS = 20
@@ -343,15 +344,27 @@ def _render_text_layer(text, font, color, mode):
 # clock scene
 # ---------------------------------------------------------------------------
 
-def _clock_overlay(ck, w, h, tint, gamma, now=None):
+def _clock_overlay(ck, w, h, tint, gamma, now=None, outline=False):
     """The clock text as (color layer, alpha mask) built from the cached
     intensity grid. Rebuilding this costs real CPU, but the text only
-    changes once a second — callers cache it on (text, suffix, colon)."""
+    changes once a second — callers cache it on (text, suffix, colon).
+
+    outline: bake the 1px black halo INTO the layer/alpha (dilated alpha,
+    black ring pixels). The halo used to cost 4 paste ops on every frame
+    of an animated background; baked here it costs a few ops once per
+    cached state instead."""
     grid, _ = clock.render_indexed(ck, w, h, now=now)
     color = clock._text_color(ck, tint, gamma)
     alpha = Image.frombytes(
         "L", (w, h), bytes(bytearray(v * 17 for row in grid for v in row)))
     layer = Image.new("RGB", (w, h), color)
+    if outline:
+        dil = alpha
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            dil = ImageChops.lighter(dil, ImageChops.offset(alpha, dx, dy))
+        ring = Image.new("RGB", (w, h))          # black
+        ring.paste(layer, (0, 0), alpha)         # digits keep their color
+        layer, alpha = ring, dil
     return layer, alpha
 
 
@@ -396,8 +409,12 @@ def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None,
     elapsed = 0
     idx = 0
     remaining = bg_frames[0][1] if bg_frames else 0
-    overlay_key = None
+    overlay_lru = {}          # (text, suffix, colon) -> (layer, alpha):
+                              # blink alternates 2 states/minute, so per-run
+                              # caching kills the per-second rebuild
     layer = alpha = None
+    frame = None
+    frame_key = None          # (overlay state, bg frame) the frame shows
     extended = 0
     while True:
         if elapsed >= dwell:
@@ -414,20 +431,28 @@ def clock_scene(cfg, canvas=CANVAS, dwell_ms=None, backgrounds=None, rng=None,
         text, suffix = clock.time_text(ck, now_dt)
         colon = clock.colon_visible(ck, now_dt)
         key = (text, suffix, colon)
-        if key != overlay_key:
-            layer, alpha = _clock_overlay(ck, w, h, tint, gamma, now=now_dt)
-            overlay_key = key
+        hit = overlay_lru.get(key)
+        if hit is None:
+            if len(overlay_lru) >= 8:     # minute rollovers during a long
+                overlay_lru.clear()       # extend; keys never mutate
+            hit = _clock_overlay(ck, w, h, tint, gamma, now=now_dt,
+                                 outline=outline)
+            overlay_lru[key] = hit
+        layer, alpha = hit
 
-        if bg_frames:
-            frame = bg_frames[idx][0].copy()
-            if outline:
-                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                    frame.paste(black, (dx, dy), alpha)
-            hold = min(remaining, CLOCK_TICK_MS)
-        else:
-            frame = black.copy()
-            hold = 1000  # nothing else moves: one frame per second
-        frame.paste(layer, (0, 0), alpha)
+        # Recompose only when the visible content actually changed (new
+        # colon/text state or a new background frame): the composed frame
+        # is immutable downstream, so yielding the same image again is
+        # free — the no-background clock now costs zero PIL ops between
+        # second boundaries.
+        want = (key, idx if bg_frames else -1)
+        if frame is None or want != frame_key:
+            base = bg_frames[idx][0] if bg_frames else black
+            frame = base.copy()
+            frame.paste(layer, (0, 0), alpha)
+            frame_key = want
+
+        hold = min(remaining, CLOCK_TICK_MS) if bg_frames else 1000
 
         # land the next frame exactly on the second so the colon flips on
         # the beat (and the minute rolls over on time)
@@ -528,13 +553,102 @@ def _name_overlay(text, w, h):
     return layer
 
 
+# bytes.translate table: transparency index -> opaque mask value, else 0.
+# Turns a frame's index buffer into an L-mode "clock may show through here"
+# mask with one C call (a Python pixel loop costs ~10ms/frame on the Pi).
+_TRANSP_MASK = bytes(255 if i == rda.TRANSPARENT else 0 for i in range(256))
+
+
+def materialize_dmd(cfg, header, indexes, slab_frames=16, pace_s=0.0):
+    """Pre-render RDA frames to StripFrame windows, worker-side.
+
+    -> (strips, masks) or None when strips can't be used at all
+    (name-during mode pastes a per-frame layer).
+
+    strips: list aligned with `indexes`, a StripFrame per frame — the
+    render loop blits non-overlay frames directly (zero PIL ops) and
+    builds overlay frames as realize()+paste over the pre-rendered base
+    instead of the classic composite+frombytes+putpalette+convert chain.
+
+    masks: only for ClockBehind anims — an L image per overlay-window
+    frame marking the B237 transparency pixels the clock shows through;
+    None otherwise / outside the window.
+
+    Slabs of `slab_frames`, exactly like RgfClip.materialize(): one
+    whole-clip convert is a single C call that can hold the GIL for
+    seconds on the Pi; 32-frame slabs bound every hold to tens of ms.
+    pace_s: voluntary sleep between slabs (prefetch worker politeness).
+    """
+    if cfg.get("playback.show_name", "hide") == "during":
+        return None
+    w, h = rda.WIDTH, rda.HEIGHT
+    mode, _, _, start, end = _resolve_overlay(cfg, header)
+    tint, gamma = _display(cfg, game=header.get("game"))
+    palette = rda.build_palette(tint, gamma)
+    n = len(indexes)
+    strips = [None] * n
+    for s0 in range(0, n, slab_frames):
+        s1 = min(s0 + slab_frames, n)
+        raw = b"".join(rda.flatten_transparency(indexes[i])
+                       for i in range(s0, s1))
+        slab = Image.frombytes("P", (w, h * (s1 - s0)), raw)
+        slab.putpalette(palette)
+        slab = slab.convert("RGB")
+        slab.load()
+        for i in range(s0, s1):
+            strips[i] = StripFrame(slab, (i - s0) * h, w, h)
+        if pace_s:
+            time.sleep(pace_s)
+    masks = None
+    if mode == "back":
+        masks = [None] * n
+        for k, i in enumerate(range(start, min(end + 1, n))):
+            masks[i] = Image.frombytes(
+                "L", (w, h), bytes(indexes[i]).translate(_TRANSP_MASK))
+            if pace_s and k % 16 == 15:
+                time.sleep(pace_s)
+    return strips, masks
+
+
+def _clock_patch(ck_ov, palette, now_dt, size_hint, override_xy, outline):
+    """The overlay clock as an (RGB layer, L alpha) pair, built from the
+    cached intensity grid with index-composite semantics: digit pixels
+    REPLACE art with palette[v] (alpha 255, not blended), and the outline
+    ring is opaque black. Costs a few ms once per clock state; the old
+    per-segment index composite + frombytes + putpalette + convert chain
+    cost ~40ms on every animation frame inside the overlay window."""
+    grid, _ = clock.render_indexed(ck_ov, rda.WIDTH, rda.HEIGHT, now=now_dt,
+                                   size_hint=size_hint,
+                                   override_xy=override_xy)
+    lit, ring = clock._grid_sparse(grid)
+    npx = rda.WIDTH * rda.HEIGHT
+    layer_b = bytearray(npx * 3)
+    alpha_b = bytearray(npx)
+    for i, v in lit:
+        alpha_b[i] = 255
+        layer_b[3 * i:3 * i + 3] = palette[3 * v:3 * v + 3]
+    if outline:
+        for i in ring:
+            alpha_b[i] = 255          # layer stays black there
+    layer = Image.frombytes("RGB", (rda.WIDTH, rda.HEIGHT), bytes(layer_b))
+    alpha = Image.frombytes("L", (rda.WIDTH, rda.HEIGHT), bytes(alpha_b))
+    return layer, alpha
+
+
 def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS,
-              indexes=None, time_fn=None):
+              indexes=None, time_fn=None, strips=None, masks=None):
     """Play an RDA animation honoring per-frame durations and the clock
     overlay rules (playback.clock_overlay / per-animation metadata).
 
     indexes: optional pre-unpacked frames (the prefetcher supplies these so
     the render loop does not pay for nibble expansion per frame).
+
+    strips/masks: optional materialize_dmd() output. Non-overlay frames
+    yield their StripFrame directly (driver blits it with one clipped
+    paste; the full 3-PIL-op per-frame rebuild was the reason short-hold
+    RDA anims could never keep up on the Pi). Overlay-window frames build
+    as realize() + one paste of a cached RGB clock patch — ClockBehind
+    pastes through the frame's pre-computed transparency mask.
 
     time_fn: wall clock for landing the overlay clock's colon flip on the
     second even inside a long animation frame — the frame's hold is split
@@ -566,12 +680,55 @@ def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS,
     ck_ov["x"] = 0
     ck_ov["y"] = 0
 
+    if strips is not None and ((rda.WIDTH, rda.HEIGHT) != (w, h)
+                               or name_layer is not None):
+        strips = None    # strip windows are native-size, no per-frame paste
+
+    patch_lru = {}       # clock state -> (layer, alpha); blink alternates
+                         # 2 states/minute so this amortizes to nothing
+
     durations = header.get("durations", [])
     for i, packed in enumerate(frames):
-        base = indexes[i] if indexes is not None else rda.unpack_frame(packed)
         dur = durations[i] if i < len(durations) else GIF_DEFAULT_FRAME_MS
         left = max(MIN_FRAME_MS, int(dur))
         overlay = mode is not None and start <= i <= end
+        sf = strips[i] if strips is not None else None
+        if sf is not None and not overlay:
+            # pre-rendered worker-side: zero PIL ops in the render loop
+            yield sf, left
+            continue
+        mask = masks[i] if masks is not None else None
+        if sf is not None and (mode == "front" or mask is not None):
+            # overlay over the pre-rendered base: one crop + one paste
+            # per segment, patch cached per clock state
+            while True:
+                now_dt = to_change = None
+                if time_fn is not None:
+                    now_dt, to_change = _clock_beat(ck, time_fn)
+                sample = now_dt or datetime.datetime.now()
+                text, suffix = clock.time_text(ck_ov, sample)
+                pk = (text, suffix, clock.colon_visible(ck_ov, sample))
+                patch = patch_lru.get(pk)
+                if patch is None:
+                    if len(patch_lru) >= 8:
+                        patch_lru.clear()
+                    patch = _clock_patch(ck_ov, palette, now_dt, size_hint,
+                                         override_xy,
+                                         outline and mode == "front")
+                    patch_lru[pk] = patch
+                img = sf.realize()
+                a = patch[1] if mask is None \
+                    else ImageChops.darker(patch[1], mask)
+                img.paste(patch[0], (0, 0), a)
+                if to_change is not None \
+                        and MIN_FRAME_MS <= to_change <= left - MIN_FRAME_MS:
+                    yield img, to_change
+                    left -= to_change
+                    continue
+                yield img, left
+                break
+            continue
+        base = indexes[i] if indexes is not None else rda.unpack_frame(packed)
         while True:
             now_dt = to_change = None
             if overlay and time_fn is not None:
