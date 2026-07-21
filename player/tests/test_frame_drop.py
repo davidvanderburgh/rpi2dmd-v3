@@ -93,6 +93,24 @@ def one_frame():
 sched.play_scene(one_frame(), "clock", log="card")
 check("single-frame scene always shows", driver.shown == ["card"])
 
+# 5. prefetch quiet gate: set while an animation scene is on screen (the
+# decode worker naps hard then), cleared afterwards, untouched by clock
+flags = []
+
+
+def probe_scene():
+    yield "a", 30
+    flags.append(sched.prefetch.quiet.is_set())
+    yield "b", 30
+
+
+sched.play_scene(probe_scene(), "animation", log="probe")
+check("quiet set while animation plays", flags == [True], flags)
+check("quiet cleared after scene", not sched.prefetch.quiet.is_set())
+sched.play_scene(iter([("c", 30)]), "clock", log="clockprobe")
+check("clock scene does not set quiet",
+      not sched.prefetch.quiet.is_set())
+
 print()
 if fails:
     print("FAILED: %s" % fails)

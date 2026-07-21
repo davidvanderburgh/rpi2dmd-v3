@@ -183,7 +183,8 @@ class DecodeBudgetExceeded(Exception):
 
 
 def _load_image_frames(path, target=None, max_frames=None,
-                       pace_every=0, pace_s=0.0, abort_after_s=0.0):
+                       pace_every=0, pace_s=0.0, pace_fn=None,
+                       abort_after_s=0.0):
     """Load a (possibly animated) image -> list of (RGB image, duration_ms).
 
     Frames are composited over the previous frame so partial/transparent
@@ -227,7 +228,10 @@ def _load_image_frames(path, target=None, max_frames=None,
         if len(frames) >= limit:
             break
         if pace_every and len(frames) % pace_every == 0:
-            time.sleep(pace_s)
+            if pace_fn is not None:
+                pace_fn()
+            else:
+                time.sleep(pace_s)
     if not frames:
         out = img.convert("RGB")
         if target is not None:
@@ -559,7 +563,8 @@ def _name_overlay(text, w, h):
 _TRANSP_MASK = bytes(255 if i == rda.TRANSPARENT else 0 for i in range(256))
 
 
-def materialize_dmd(cfg, header, indexes, slab_frames=16, pace_s=0.0):
+def materialize_dmd(cfg, header, indexes, slab_frames=16, pace_s=0.0,
+                    pace_fn=None):
     """Pre-render RDA frames to StripFrame windows, worker-side.
 
     -> (strips, masks) or None when strips can't be used at all
@@ -577,10 +582,19 @@ def materialize_dmd(cfg, header, indexes, slab_frames=16, pace_s=0.0):
     Slabs of `slab_frames`, exactly like RgfClip.materialize(): one
     whole-clip convert is a single C call that can hold the GIL for
     seconds on the Pi; 32-frame slabs bound every hold to tens of ms.
-    pace_s: voluntary sleep between slabs (prefetch worker politeness).
+    pace_s: voluntary sleep between slabs (prefetch worker politeness);
+    pace_fn replaces it when given (the prefetcher's animation-aware
+    pacer).
     """
     if cfg.get("playback.show_name", "hide") == "during":
         return None
+
+    def pace():
+        if pace_fn is not None:
+            pace_fn()
+        elif pace_s:
+            time.sleep(pace_s)
+
     w, h = rda.WIDTH, rda.HEIGHT
     mode, _, _, start, end = _resolve_overlay(cfg, header)
     tint, gamma = _display(cfg, game=header.get("game"))
@@ -597,16 +611,15 @@ def materialize_dmd(cfg, header, indexes, slab_frames=16, pace_s=0.0):
         slab.load()
         for i in range(s0, s1):
             strips[i] = StripFrame(slab, (i - s0) * h, w, h)
-        if pace_s:
-            time.sleep(pace_s)
+        pace()
     masks = None
     if mode == "back":
         masks = [None] * n
         for k, i in enumerate(range(start, min(end + 1, n))):
             masks[i] = Image.frombytes(
                 "L", (w, h), bytes(indexes[i]).translate(_TRANSP_MASK))
-            if pace_s and k % 16 == 15:
-                time.sleep(pace_s)
+            if k % 16 == 15:
+                pace()
     return strips, masks
 
 
@@ -769,14 +782,15 @@ def dmd_scene(cfg, rda_path, header=None, frames=None, canvas=CANVAS,
 # ---------------------------------------------------------------------------
 
 def load_gif_frames(path, canvas=CANVAS, max_frames=None,
-                    pace_every=0, pace_s=0.0, abort_after_s=0.0):
+                    pace_every=0, pace_s=0.0, pace_fn=None,
+                    abort_after_s=0.0):
     """Decode a GIF to canvas-sized frames. Slow on a Pi (big GIFs take
     seconds), so the scheduler prefetches this off the critical path."""
     if max_frames is None:
         max_frames = PLAYBACK_MAX_GIF_FRAMES
     return _load_image_frames(path, target=canvas, max_frames=max_frames,
                               pace_every=pace_every, pace_s=pace_s,
-                              abort_after_s=abort_after_s)
+                              pace_fn=pace_fn, abort_after_s=abort_after_s)
 
 
 def gif_scene(cfg, path, canvas=CANVAS, frames=None, time_fn=None):

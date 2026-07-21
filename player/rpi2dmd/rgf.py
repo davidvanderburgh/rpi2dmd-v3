@@ -188,7 +188,7 @@ class RgfClip(object):
         for i in range(len(self._offsets)):
             yield self.frame(i), self.durations[i]
 
-    def materialize(self, pace_every=0, pace_s=0.0):
+    def materialize(self, pace_every=0, pace_s=0.0, pace_fn=None):
         """-> list of (StripFrame, duration_ms) via bulk conversion, or
         None when this clip cannot be bulk-converted (v1, or too long).
 
@@ -200,7 +200,9 @@ class RgfClip(object):
         ~6ms per shown frame to realize — measured, stuttered.)
 
         pace_every/pace_s: voluntary sleeps between decompress batches so
-        the worker never monopolizes the GIL for long.
+        the worker never monopolizes the GIL for long. pace_fn, when
+        given, replaces the plain sleep (the prefetcher passes a pacer
+        that naps much longer while an animation is on screen).
         """
         if self.version != 2 or len(self) > MATERIALIZE_MAX_FRAMES:
             return None
@@ -229,7 +231,9 @@ class RgfClip(object):
                 out.append((StripFrame(slab, (i - s0) * self.height,
                                        self.width, self.height),
                             self.durations[i]))
-            if pace_every:
+            if pace_fn is not None:
+                pace_fn()
+            elif pace_every:
                 time.sleep(pace_s)
         return out
 

@@ -8,6 +8,7 @@ Python 3.7 compatible.
 """
 
 import argparse
+import gc
 import os
 import random
 import signal
@@ -110,11 +111,32 @@ def _crash_loop_guard(cfg):
     return cfg
 
 
+def _gc_watch():
+    """Log garbage-collection pauses long enough to steal a frame. The
+    render loop shares the interpreter; a full (gen-2) pass scans every
+    live object — library index included — holding the GIL throughout,
+    and is the prime suspect for scattered 300-1000ms frame stalls."""
+    t0 = [0.0]
+
+    def cb(phase, info):
+        if phase == "start":
+            t0[0] = time.time()
+        else:
+            ms = (time.time() - t0[0]) * 1000.0
+            if ms >= 50:
+                sys.stderr.write(
+                    "gc: gen%s pause %.0fms (collected %s)\n"
+                    % (info.get("generation"), ms, info.get("collected")))
+
+    gc.callbacks.append(cb)
+
+
 def main(argv=None):
     # Shorter GIL slices: the prefetch decoder shares the interpreter with
     # the frame-pacing render loop, and the default 5ms switch interval is
     # visible jitter at second-boundary precision.
     sys.setswitchinterval(0.002)
+    _gc_watch()
     args = parse_args(argv)
     cfg = config.Config(args.config)
     if not args.sim:
@@ -138,6 +160,17 @@ def main(argv=None):
                                 weather=weather_svc, fast=args.fast,
                                 max_frames=args.frames,
                                 snapshot_path=args.snapshot)
+
+    # Everything allocated so far (module code, the 13k-item library
+    # index) is immortal for this process: freeze it out of every future
+    # GC scan. Then disable AUTOMATIC collection outright — even gen-0
+    # passes measured 60-150ms here (freeing dead strip slabs) and they
+    # fire mid-animation, each one a dropped frame. Reference counting
+    # still frees everything acyclic immediately; actual cycles wait for
+    # the scheduler's explicit collect at scene boundaries (clock time),
+    # where the pause lands on a ~1s hold and is invisible.
+    gc.freeze()
+    gc.disable()
 
     def _stop_handler(signum, frame):
         state.request_stop()

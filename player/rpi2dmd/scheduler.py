@@ -12,6 +12,7 @@ Python 3.7 compatible.
 
 import collections
 import datetime
+import gc
 import json
 import os
 import random
@@ -29,6 +30,10 @@ PREFETCH_DEPTH = 3          # decoded animations kept ahead of playback
 PREFETCH_PACE_EVERY = 8     # frames decoded between voluntary sleeps
 PREFETCH_PACE_S = 0.012     # the sleep: caps GIL bursts so the clock's
                             # render thread never waits behind a decode
+# While an ANIMATION is on screen the render loop has 33-66ms of slack
+# per frame and background decode measurably steals frames (see _pace);
+# the worker fully stops at its next pace point and resumes on clock
+# time, where holds are ~1s and steals are invisible.
 # One decode worker feeds playback, so a monster GIF (60s+ to decode on the
 # Pi's leftover ~25% of a core) stalls every animation behind it and the
 # panel shows only clock meanwhile. Bound each attempt; the offender is
@@ -95,11 +100,28 @@ class Prefetcher(object):
         self.depth = depth
         self.cfg = cfg     # for worker-side DMD strip pre-render; a config
                            # change flushes the queue, so no stale tints
+        # set while a short-slack scene (animation) is on screen: the
+        # worker's pace sleeps stretch so decode steals land on the clock
+        self.quiet = threading.Event()
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
         self._pending = []                       # picks to decode, in order
         self._done = collections.OrderedDict()   # pick -> payload (or None)
         self._thread = None
+
+    def _pace(self, base=PREFETCH_PACE_S):
+        # An animation on screen means FULL STOP — no trickle. Isolated-
+        # play A/B on the device: the same 250-frame clip lost 53 frames
+        # with the worker trickling (40ms naps, nice 10) vs 1 with it
+        # idle; GIL-free C work still owns the single core, and a
+        # buffered-count condition here just relocated the drops to the
+        # animation's first seconds (late_ix=0 bursts) while the NEXT
+        # item decoded. If the queue is not ready when the animation
+        # ends, the clock extends (its designed job) and the worker
+        # sprints at full pace during clock time.
+        while self.quiet.is_set():
+            time.sleep(0.05)
+        time.sleep(base)
 
     # -- producer side -----------------------------------------------------
     def ensure(self, picks):
@@ -189,13 +211,13 @@ class Prefetcher(object):
                 for i, f in enumerate(frames):
                     indexes.append(rda.unpack_frame(f))
                     if i % (PREFETCH_PACE_EVERY * 2) == 0:
-                        time.sleep(PREFETCH_PACE_S)
+                        self._pace()
                 prep = None
                 if self.cfg is not None:
                     # pre-render frames to blit-ready strips + transparency
                     # masks for ClockBehind (see materialize_dmd)
                     prep = scenes.materialize_dmd(
-                        self.cfg, header, indexes, pace_s=PREFETCH_PACE_S)
+                        self.cfg, header, indexes, pace_fn=self._pace)
                 return (header, frames, indexes, prep)
             clip = _cached_gif(item[0], item[1], item[2])
             if clip is not None:
@@ -205,12 +227,12 @@ class Prefetcher(object):
                 # stay lazy — their memory cost would be unbounded.
                 frames = clip.materialize(
                     pace_every=PREFETCH_PACE_EVERY * 4,
-                    pace_s=PREFETCH_PACE_S)
+                    pace_s=PREFETCH_PACE_S, pace_fn=self._pace)
                 return frames if frames is not None else clip
             return scenes.load_gif_frames(
                 item[2], self.canvas,
                 pace_every=PREFETCH_PACE_EVERY, pace_s=PREFETCH_PACE_S,
-                abort_after_s=DECODE_BUDGET_S)
+                pace_fn=self._pace, abort_after_s=DECODE_BUDGET_S)
         except scenes.DecodeBudgetExceeded as e:
             sys.stderr.write("prefetch: skipping slow GIF (%s)\n" % (e,))
             return None
@@ -239,7 +261,8 @@ class _FrameStats(object):
     """Per-scene-run timing collector; emit() writes one JSON line."""
 
     __slots__ = ("scene", "ident", "t_start", "planned_ms", "lates",
-                 "shows", "resyncs", "resync_worst", "dropped", "_t0")
+                 "shows", "resyncs", "resync_worst", "dropped", "late_ix",
+                 "_t0")
 
     def __init__(self, scene, ident):
         if isinstance(ident, tuple):
@@ -253,10 +276,15 @@ class _FrameStats(object):
         self.resyncs = 0
         self.resync_worst = 0
         self.dropped = 0         # frames skipped because their window passed
+        self.late_ix = 0         # frame position of the worst lateness:
+                                 # 0/1 = scene startup, else mid-scene
         self._t0 = 0.0
 
     def pre_show(self, late_s, hold_ms):
-        self.lates.append(int(late_s * 1000))
+        ms = int(late_s * 1000)
+        if not self.lates or ms > max(self.lates):
+            self.late_ix = len(self.lates) + self.dropped
+        self.lates.append(ms)
         self.planned_ms += int(hold_ms)
         self._t0 = time.time()
 
@@ -290,6 +318,7 @@ class _FrameStats(object):
             "resyncs": self.resyncs,
             "resync_max": self.resync_worst,
             "dropped": self.dropped,
+            "late_ix": self.late_ix,
         }
         path = os.path.join(paths.run_dir(), FRAMETIME_LOG)
         try:
@@ -312,6 +341,10 @@ MAX_LAG_S = 0.25          # beyond this we resync rather than catch up
 # stutter the eye catches. Bounded so the panel always makes visible
 # progress even when we are hopelessly behind.
 MAX_FRAME_DROPS = 3
+# Explicit gc.collect() cadence, run at scene boundaries (automatic
+# collection is disabled — see main()): even gen-0 passes cost 60-150ms
+# on this hardware (freeing dead strip slabs) and fired mid-animation.
+GC_INTERVAL_S = 60.0
 NICE_NORMAL = -5          # display first: hit frame deadlines
 NICE_WEB_ACTIVE = 15      # someone is using the web UI: get out of its way
 
@@ -384,6 +417,7 @@ class Scheduler(object):
         self._ui_checked_at = 0.0
         self._ui_active = False
         self._nice_now = None
+        self._last_gc = time.time()
 
     # -- time --------------------------------------------------------------
     def _now(self):
@@ -430,6 +464,10 @@ class Scheduler(object):
         stats = None if self.fast else _FrameStats(state_name, log)
         drops = 0
         shown_any = False
+        if state_name == "animation":
+            # short-slack frames on screen: background decode naps hard
+            # (see Prefetcher._pace) and catches up on clock time
+            self.prefetch.quiet.set()
         try:
             for img, hold in scene:
                 if st.stop_requested:
@@ -492,6 +530,7 @@ class Scheduler(object):
             sys.stderr.write("scene %r failed:\n" % (state_name,))
             traceback.print_exc()
         finally:
+            self.prefetch.quiet.clear()
             # consume a skip that landed at the very end of the scene so it
             # cannot leak into (and instantly cancel) the next scene
             st.take_skip()
@@ -546,7 +585,16 @@ class Scheduler(object):
             st.set_brightness(pct)
 
     def _boundary(self):
-        """Scene-boundary housekeeping: hot reload + brightness + status."""
+        """Scene-boundary housekeeping: hot reload + brightness + status.
+
+        Also the explicit gc.collect() slot: automatic collection is
+        disabled in main() because even gen-0 passes cost 60-150ms here
+        and fired mid-animation. A boundary always precedes a scene, so
+        the pause lands before the clock's first ~1s hold — invisible —
+        and this runs regardless of whether animations are enabled."""
+        if not self.fast and time.time() - self._last_gc >= GC_INTERVAL_S:
+            self._last_gc = time.time()
+            gc.collect()
         st = self.state
         if st.take_reload() or self.cfg.changed_on_disk():
             try:
@@ -996,12 +1044,13 @@ class Scheduler(object):
             # after the extend gate this is normally instant; the short
             # timeout only covers the extend-cap case
             preloaded = self.prefetch.take(picked, timeout=1.0)
-            if kind == "gif" and preloaded is None:
-                # failed or budget-skipped decode: loading it synchronously
-                # in the scene froze the panel for its whole decode (45s
-                # measured). Skip it; the clock plays this slot instead.
-                sys.stderr.write("scheduler: skipping %s/%s (no decoded "
-                                 "frames)\n" % (item[0], item[1]))
+            if preloaded is None:
+                # failed or still-decoding payload: loading synchronously
+                # on the render thread froze the panel (45s measured for a
+                # gif; a dmd pays read_rda + per-frame unpack with no
+                # strips). Skip it; the clock plays this slot instead.
+                sys.stderr.write("scheduler: skipping %s %s/%s (payload "
+                                 "not ready)\n" % (kind, item[0], item[1]))
                 return
         if kind == "dmd":
             self._play_dmd(item[0], item[1], item[2], preloaded=preloaded)
