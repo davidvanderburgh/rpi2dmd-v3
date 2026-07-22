@@ -29,12 +29,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 TARGET = (128, 32)
 MIN_FRAMES = 100
 
-# driver.show() costs ~33ms p50 / ~50ms p90 on the Pi Zero (the matrix
-# binding's SetImage walks every pixel even on its fast path), so holds
-# below ~66ms cannot be paced reliably — such clips stuttered. Clips whose
-# median hold is faster are retimed onto a uniform 66ms grid (15fps):
-# standard resampling, total duration preserved, frame chosen per tick.
-MIN_HOLD_MS = 66
+# driver.show() cost ~33-50ms on the stock matrix binding, which forced a
+# 66ms/15fps retime grid; the blit-patched binding (docs/binding-blit.md)
+# brought it to ~25-28ms, so 50ms/20fps holds now pace reliably. Clips
+# whose median hold is below the floor are retimed onto a uniform 50ms
+# grid: standard resampling, total duration preserved, frame chosen per
+# tick. 30fps sources keep a third more frames than on the old grid —
+# visibly smoother on FMV-style and scrolling clips.
+MIN_HOLD_MS = 50
 
 
 def retime_fast_clip(frames, min_hold=MIN_HOLD_MS):

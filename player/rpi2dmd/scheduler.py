@@ -335,12 +335,16 @@ WEATHER_SHOW_INTERVAL_S = 3600
 SNAPSHOT_INTERVAL_S = 2.0
 MIN_FRAME_S = 0.02        # never pace faster than 50fps
 MAX_LAG_S = 0.25          # beyond this we resync rather than catch up
-# When a frame's whole display window has already passed, drop it instead
-# of showing it late: at 128x32 a dropped animation frame is invisible,
-# while the slow-motion crawl into a MAX_LAG resync jump was exactly the
-# stutter the eye catches. Bounded so the panel always makes visible
-# progress even when we are hopelessly behind.
+# When a frame's display window has passed BY A REAL MARGIN, drop it
+# instead of showing it late. The grace matters: on smooth scrolling
+# content the eye sees frame SPACING, not absolute delay — running a
+# uniform 70-150ms behind is invisible, while every drop is a visible
+# jerk (field report: 16 scattered drops on a 260-frame scroller under
+# mild contention read as stutter). So mild lag rides; only a genuine
+# stall (window passed by more than the grace) skips frames to catch
+# up, still bounded so the panel always makes visible progress.
 MAX_FRAME_DROPS = 3
+DROP_GRACE_MS = 100
 # Explicit gc.collect() cadence, run at scene boundaries (automatic
 # collection is disabled — see main()): even gen-0 passes cost 60-150ms
 # on this hardware (freeing dead strip slabs) and fired mid-animation.
@@ -481,12 +485,13 @@ class Scheduler(object):
                         break
                     deadline = self._now()   # resync after a pause
                 if shown_any and not self.fast \
-                        and (self._now() - deadline) * 1000.0 >= hold \
+                        and (self._now() - deadline) * 1000.0 \
+                        >= hold + DROP_GRACE_MS \
                         and drops < MAX_FRAME_DROPS:
-                    # the frame's whole display window is already in the
-                    # past: drop it and stay on the beat (bounded; never
-                    # the first frame — its lateness is scene startup
-                    # cost, and a one-frame scene must still show)
+                    # the frame's display window passed by more than the
+                    # grace: drop it and catch up (bounded; never the
+                    # first frame — its lateness is scene startup cost,
+                    # and a one-frame scene must still show)
                     drops += 1
                     if stats is not None:
                         stats.dropped += 1
