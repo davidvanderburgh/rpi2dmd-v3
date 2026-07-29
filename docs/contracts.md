@@ -77,9 +77,12 @@ Scheduler implements the Run-DMD model:
 1. Clock scene idles for the configured animation-frequency gap
    (`config.animation_gap_seconds(rng)`, None = animations off → clock
    forever, interleaving date/weather/message at their frequencies).
-2. Then one animation: DMD RDA with probability `playback.dmd_share`%,
-   else GIF; chosen uniformly among enabled items
-   (`playback.content_filter` == "show_all" ignores the enabled flags).
+2. Then one animation, drawn from a no-repeat shuffle bag over the whole
+   enabled library (DMD + GIF in one setlist, so kinds appear at their
+   natural proportions): every item plays once per pass, then a fresh
+   shuffled pass begins. `playback.sources` can restrict to one kind
+   (per-kind bag); `playback.content_filter` == "show_all" ignores the
+   enabled flags.
 3. Clock overlay during DMD animations: `playback.clock_overlay` =
    `auto` (per-anim RDA metadata: type/size/x/y/start-end frames) |
    `front` | `back` | `off`. In index space via

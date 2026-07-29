@@ -1,7 +1,8 @@
 """Scheduler: the Run-DMD playback model.
 
 Clock idles for the configured animation-frequency gap, then one animation
-plays (DMD with probability playback.dmd_share%, else GIF), interleaving
+plays, drawn from a no-repeat shuffle of the whole enabled library (DMD
+and GIF together — one random setlist after another), interleaving
 date/weather/message scenes at their own frequencies. Sleep window,
 per-hour brightness, config hot-reload and the control commands
 (pause/skip/play/marquee/test) are all handled here; per-scene exceptions
@@ -107,6 +108,8 @@ class Prefetcher(object):
         self._cv = threading.Condition(self._lock)
         self._pending = []                       # picks to decode, in order
         self._done = collections.OrderedDict()   # pick -> payload (or None)
+        self._current = None                     # pick being decoded now
+        self._cancelled = set()                  # in-flight picks to drop
         self._thread = None
 
     def _pace(self, base=PREFETCH_PACE_S):
@@ -148,6 +151,42 @@ class Prefetcher(object):
         with self._cv:
             del self._pending[:]
             self._done.clear()
+            if self._current is not None:
+                self._cancelled.add(self._current)
+            self._cv.notify_all()
+
+    def discard(self, pick):
+        """The scheduler gave up on `pick` (slot skipped): drop it wherever
+        it is — queued, decoded, or mid-decode. A skipped pick's payload
+        must never linger in _done: nothing will ever take it, yet it
+        counts toward the frame budget. Enough such orphans parked the
+        worker at the budget gate FOREVER (field wedge: 31 hours of
+        clock-only, every slot 'payload not ready', because _done held
+        >=2500 frames nobody could drain and only take() trims)."""
+        with self._cv:
+            try:
+                self._pending.remove(pick)
+            except ValueError:
+                pass
+            self._done.pop(pick, None)
+            if pick == self._current:
+                self._cancelled.add(pick)
+            self._cv.notify_all()
+
+    def retain(self, picks):
+        """Drop everything queued/decoded that is not in `picks` — the
+        scheduler's current want-list, passed at each clock kickoff. This
+        is the standing invariant behind the budget gate: every buffered
+        payload is one the scheduler still intends to take, so the gate
+        can always drain and the worker can never wedge on leftovers."""
+        keep = set(picks)
+        with self._cv:
+            self._pending[:] = [p for p in self._pending if p in keep]
+            for p in [p for p in self._done if p not in keep]:
+                del self._done[p]
+            if self._current is not None and self._current not in keep:
+                self._cancelled.add(self._current)
+            self._cv.notify_all()
 
     # -- consumer side -----------------------------------------------------
     def ready(self, pick):
@@ -197,9 +236,15 @@ class Prefetcher(object):
                         self._buffered_frames() >= PREFETCH_FRAME_BUDGET):
                     self._cv.wait(5.0)
                 pick = self._pending.pop(0)
+                self._current = pick
+                self._cancelled.discard(pick)   # fresh attempt
             payload = self._decode(pick)
             with self._cv:
-                self._done[pick] = payload
+                self._current = None
+                if pick in self._cancelled:
+                    self._cancelled.discard(pick)   # nobody wants it now
+                else:
+                    self._done[pick] = payload
                 self._cv.notify_all()
 
     def _decode(self, pick):
@@ -736,18 +781,17 @@ class Scheduler(object):
 
     # -- content picking ---------------------------------------------------
     def _pick_animation(self):
-        """-> ('dmd'|'gif', item tuple) or None, per sources + dmd_share."""
+        """-> ('dmd'|'gif', item tuple) or None, per playback.sources.
+        With both sources on, one setlist covers the whole library and
+        kinds appear at their natural proportions — there is no bias
+        knob to skew DMD vs GIF anymore."""
         cfg = self.cfg
         sources = cfg.get("playback.sources", {}) or {}
         dmd_ok = bool(sources.get("dmd", True))
         gif_ok = bool(sources.get("gif", True))
-        try:
-            share = float(cfg.get("playback.dmd_share", 60))
-        except (TypeError, ValueError):
-            share = 60
-        want_dmd = dmd_ok and (not gif_ok or
-                               self.rng.uniform(0, 100) < share)
-        if want_dmd:
+        if dmd_ok and gif_ok:
+            return self.library.pick_any(self.rng, cfg)
+        if dmd_ok:
             item = self.library.pick_dmd(self.rng, cfg)
             if item is not None:
                 return "dmd", item
@@ -755,10 +799,6 @@ class Scheduler(object):
             item = self.library.pick_gif(self.rng, cfg)
             if item is not None:
                 return "gif", item
-        if dmd_ok and not want_dmd:
-            item = self.library.pick_dmd(self.rng, cfg)
-            if item is not None:
-                return "dmd", item
         return None
 
     def _play_name_card(self, title):
@@ -1004,6 +1044,9 @@ class Scheduler(object):
                         if nxt is None or nxt in self._upcoming:
                             break
                         self._upcoming.append(nxt)
+                    # drop leftovers from skipped/abandoned picks first, so
+                    # they can never hold the worker at its frame budget
+                    self.prefetch.retain(self._upcoming)
                     if self._upcoming:
                         self.prefetch.ensure(self._upcoming)
 
@@ -1056,6 +1099,7 @@ class Scheduler(object):
                 # strips). Skip it; the clock plays this slot instead.
                 sys.stderr.write("scheduler: skipping %s %s/%s (payload "
                                  "not ready)\n" % (kind, item[0], item[1]))
+                self.prefetch.discard(picked)
                 return
         if kind == "dmd":
             self._play_dmd(item[0], item[1], item[2], preloaded=preloaded)

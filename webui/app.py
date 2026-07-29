@@ -482,7 +482,6 @@ def _validate(node, defaults, prefix=""):
 _CLAMPS = [
     (("clock", "shade"), 1, 15),
     (("clock", "font_size"), 4, 64),
-    (("playback", "dmd_share"), 0, 100),
     (("panel", "pwm_bits"), 1, 11),
     (("panel", "cols"), 8, 256),
     (("panel", "rows"), 8, 128),

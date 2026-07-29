@@ -21,10 +21,6 @@
     </select>
     <span class="hint">How long the clock idles between animations.</span>
   </label>
-  <label class="field">Content mix <span class="live-val mono" id="share-label"></span>
-    <input type="range" id="dmd-share" data-cfg="playback.dmd_share" min="0" max="100" step="5" value="{{ p.dmd_share }}">
-    <span class="hint">Chance each animation slot plays a DMD animation instead of a GIF clip.</span>
-  </label>
   <label class="field">Content filter
     <select data-cfg="playback.content_filter">
       <option value="enabled_only" {% if p.content_filter == 'enabled_only' %}selected{% endif %}>Enabled items only</option>

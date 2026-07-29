@@ -603,14 +603,6 @@
   // ---- simple form pages -------------------------------------------------------
 
   function initPlayback() {
-    var share = $("#dmd-share");
-    var label = $("#share-label");
-    function updateShare() {
-      label.textContent = share.value + "% DMD / " +
-        (100 - share.value) + "% GIF";
-    }
-    share.addEventListener("input", updateShare);
-    updateShare();
     $("#playback-save").addEventListener("click", function () {
       saveConfig(gatherCfg($("#playback-form")), "Playback saved");
     });

@@ -36,6 +36,8 @@ class Library(object):
         # showed as the panel hanging on the last animation frame before
         # every clock. Cache per flag-state; treat results as read-only.
         self._enabled_cache = {}
+        # kind -> (items list the bag indexes into, shuffled index bag)
+        self._bags = {}
         self.refresh()
 
     # -- loading ----------------------------------------------------------
@@ -44,6 +46,7 @@ class Library(object):
         self._load_index()
         self._scan_gifs()
         self._enabled_cache.clear()
+        self._bags.clear()
         return self
 
     def _index_path(self):
@@ -151,6 +154,21 @@ class Library(object):
         self._enabled_cache[key] = out
         return out
 
+    def enabled_all(self, cfg, ignore_flags=False):
+        """-> combined list over both kinds: ('dmd', game, name, rel) and
+        ('gif', category, filename) tuples. Cached — treat as read-only;
+        rebuilt whenever either per-kind list rebuilds (identity check),
+        so the setlist bag over it resets exactly when they change."""
+        dmd = self.enabled_dmd(cfg, ignore_flags)
+        gifs = self.enabled_gifs(cfg, ignore_flags)
+        key = ("all", ignore_flags)
+        hit = self._enabled_cache.get(key)
+        if hit is not None and hit[0] is dmd and hit[1] is gifs:
+            return hit[2]
+        out = [("dmd",) + t for t in dmd] + [("gif",) + t for t in gifs]
+        self._enabled_cache[key] = (dmd, gifs, out)
+        return out
+
     # -- status counts ----------------------------------------------------
     def counts(self, cfg):
         total_dmd = sum(len(v) for v in self.games().values())
@@ -163,12 +181,43 @@ class Library(object):
         }
 
     # -- picking ----------------------------------------------------------
+    def _draw(self, kind, items, rng):
+        """No-repeat shuffle bag: every item in `items` is drawn exactly
+        once, in random order, before any repeats — one random setlist
+        after another, forever. The bag is tied to the cached enabled
+        list by identity: when flags/index change the cache rebuilds,
+        the identity check fails, and a fresh setlist starts (the old
+        one may reference items that no longer exist)."""
+        held = self._bags.get(kind)
+        if held is None or held[0] is not items or not held[1]:
+            order = list(range(len(items)))
+            rng.shuffle(order)
+            held = (items, order)
+            self._bags[kind] = held
+        return items[held[1].pop()]
+
+    def pick_any(self, rng, cfg):
+        """-> ('dmd'|'gif', item tuple) from ONE setlist over the whole
+        enabled library: DMD animations and GIF clips interleave at
+        their natural proportions, every item exactly once per pass."""
+        items = self.enabled_all(cfg, ignore_flags=_show_all(cfg))
+        if not items:
+            return None
+        it = self._draw("all", items, rng)
+        if it[0] == "dmd":
+            _, game, name, rel = it
+            return "dmd", (game, name,
+                           os.path.join(paths.dmd_dir(), rel))
+        _, cat, fname = it
+        return "gif", (cat, fname,
+                       os.path.join(paths.gif_dir(), cat, fname))
+
     def pick_dmd(self, rng, cfg):
         """-> (game, name, rda_path) among enabled items, or None."""
         items = self.enabled_dmd(cfg, ignore_flags=_show_all(cfg))
         if not items:
             return None
-        game, name, rel = rng.choice(items)
+        game, name, rel = self._draw("dmd", items, rng)
         return game, name, os.path.join(paths.dmd_dir(), rel)
 
     def pick_gif(self, rng, cfg):
@@ -176,7 +225,7 @@ class Library(object):
         items = self.enabled_gifs(cfg, ignore_flags=_show_all(cfg))
         if not items:
             return None
-        cat, fname = rng.choice(items)
+        cat, fname = self._draw("gif", items, rng)
         return cat, fname, os.path.join(paths.gif_dir(), cat, fname)
 
     # -- lookup -----------------------------------------------------------

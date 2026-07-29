@@ -303,7 +303,7 @@ def test_pages():
         "/clock": ["clock-preview", "Classic Run-DMD", "align-grid",
                    "DMD color (global)"],
         "/library": ["lib-tabs", "Enable all DMD", "pane-gif"],
-        "/playback": ["dmd-share", "Run-DMD default", "clock_overlay",
+        "/playback": ["content_filter", "Run-DMD default", "clock_overlay",
                       "show_name"],
         "/message": ["msg-text", "Send now", "{time}"],
         "/schedule": ["bright-bars", "Day preset", "schedule.sleep"],
@@ -353,14 +353,16 @@ def test_config_api():
     post_json("/api/config", {"clock": {"enabled": True, "x": 0}})
 
     # clamping
-    _s, resp = post_json("/api/config", {"clock": {"shade": 99},
-                                         "playback": {"dmd_share": 250}})
+    _s, doc = get_json("/api/config")
+    font_size0 = doc["clock"]["font_size"]
+    _s, resp = post_json("/api/config", {"clock": {"shade": 99,
+                                                   "font_size": 999}})
     check("POST out-of-range -> ok", resp.get("ok"), resp)
     _s, doc = get_json("/api/config")
     check("shade clamped to 15", doc["clock"]["shade"] == 15, doc["clock"])
-    check("dmd_share clamped to 100",
-          doc["playback"]["dmd_share"] == 100, doc["playback"])
-    post_json("/api/config", {"playback": {"dmd_share": 60}})
+    check("font_size clamped to 64",
+          doc["clock"]["font_size"] == 64, doc["clock"])
+    post_json("/api/config", {"clock": {"font_size": font_size0}})
 
     # bad posts -> 400
     status, resp = post_json("/api/config", {"bogus_section": {"a": 1}})

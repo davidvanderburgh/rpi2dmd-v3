@@ -325,8 +325,9 @@ def test_scheduler_sequence():
     # deterministic with the same seed
     driver2 = matrix.SimDriver(cfg.data,
                                out_dir=os.path.join(TEST_RUN, "sim-out"))
-    state2 = control.PlayerState(cfg, lib)
-    sched2 = scheduler.Scheduler(cfg, driver2, state2, lib,
+    lib2 = library.Library()    # fresh: the setlist bag is library state
+    state2 = control.PlayerState(cfg, lib2)
+    sched2 = scheduler.Scheduler(cfg, driver2, state2, lib2,
                                  rng=random.Random(42), fast=True,
                                  max_frames=4000)
     sched2.run()

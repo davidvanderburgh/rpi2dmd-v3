@@ -92,7 +92,6 @@ DEFAULTS = {
         "show_name": "hide",            # hide | before | during | after
         "content_filter": "enabled_only",  # enabled_only | show_all
         "sources": {"dmd": True, "gif": True},
-        "dmd_share": 60,                # % of animation slots from DMD library
         "startup_splash": "rundmd",     # rundmd | rpi2dmd | none
         "gif_clock_overlay": False,     # draw clock over RGB GIF clips too
     },
